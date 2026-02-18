@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""
+HID++ 2.0 battery reader for Logitech devices
+Directly queries battery via hidraw without needing solaar daemon
+"""
+
+import os
+import sys
+import struct
+import fcntl
+import time
+
+# HID++ constants
+HIDPP_SHORT = 0x10  # 7 bytes total
+HIDPP_LONG = 0x11   # 20 bytes total
+
+# Feature IDs
+FEATURE_ROOT = 0x0000
+FEATURE_UNIFIED_BATTERY = 0x1004
+
+# Device index for direct USB devices
+DEVICE_INDEX = 0xFF
+
+def find_hidraw_for_product(product_id):
+    """Find hidraw device for a given USB product ID"""
+    for i in range(20):
+        hidraw = f"/dev/hidraw{i}"
+        if not os.path.exists(hidraw):
+            continue
+
+        # Check if this hidraw matches our product
+        try:
+            sysfs_path = f"/sys/class/hidraw/hidraw{i}/device"
+            # Try to find product ID in the device tree
+            for root, dirs, files in os.walk(sysfs_path):
+                for f in ['idProduct', '../idProduct', '../../idProduct']:
+                    try:
+                        with open(os.path.join(sysfs_path, f)) as pf:
+                            if pf.read().strip().lower() == product_id.lower():
+                                return hidraw
+                    except:
+                        pass
+        except:
+            pass
+    return None
+
+def open_hidraw(path):
+    """Open hidraw device"""
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+        return fd
+    except PermissionError:
+        print(f"Permission denied: {path}", file=sys.stderr)
+        return None
+    except Exception as e:
+        print(f"Error opening {path}: {e}", file=sys.stderr)
+        return None
+
+def hidpp_request(fd, device_index, feature_index, function, params=None):
+    """Send HID++ request and get response"""
+    if params is None:
+        params = []
+
+    # Build short message (0x10)
+    msg = bytes([
+        HIDPP_SHORT,
+        device_index,
+        feature_index,
+        (function << 4) | 0x0F,  # function in high nibble, software ID in low
+    ] + params + [0] * (7 - 4 - len(params)))
+
+    try:
+        os.write(fd, msg)
+    except Exception as e:
+        return None
+
+    # Read response
+    time.sleep(0.05)
+    try:
+        response = os.read(fd, 20)
+        return response
+    except BlockingIOError:
+        # Try again with longer wait
+        time.sleep(0.1)
+        try:
+            response = os.read(fd, 20)
+            return response
+        except:
+            return None
+    except Exception as e:
+        return None
+
+def get_feature_index(fd, device_index, feature_id):
+    """Get the feature index for a feature ID using ROOT feature"""
+    # ROOT is always at index 0
+    # Function 0 = getFeatureIndex
+    params = [(feature_id >> 8) & 0xFF, feature_id & 0xFF]
+    response = hidpp_request(fd, device_index, 0, 0, params)
+
+    if response and len(response) >= 5:
+        return response[4]  # Feature index is in byte 4
+    return None
+
+def get_battery_unified(fd, device_index, feature_index):
+    """Get battery using UNIFIED_BATTERY feature"""
+    # Function 0x10 = getBatteryStatus (some devices)
+    # Function 0x00 = getCapabilities, 0x10 = getStatus
+
+    # Try function 0x10 first (getStatus)
+    response = hidpp_request(fd, device_index, feature_index, 0x01)
+
+    if response and len(response) >= 8:
+        discharge = response[4]  # Battery percentage
+        level = response[5]      # Level flags
+        status = response[6]     # Charging status
+
+        if discharge > 0 and discharge <= 100:
+            return {
+                'percentage': discharge,
+                'level': level,
+                'status': status
+            }
+
+    return None
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: hidpp-battery <hidraw_device>")
+        print("Example: hidpp-battery /dev/hidraw0")
+        sys.exit(1)
+
+    hidraw_path = sys.argv[1]
+
+    fd = open_hidraw(hidraw_path)
+    if fd is None:
+        print('{"text": ""}')
+        sys.exit(1)
+
+    try:
+        # For direct USB devices, use device index 0xFF
+        device_index = 0xFF
+
+        # Get feature index for UNIFIED_BATTERY
+        feature_index = get_feature_index(fd, device_index, FEATURE_UNIFIED_BATTERY)
+
+        if feature_index is None:
+            # Try device index 0x01 (common for paired devices)
+            device_index = 0x01
+            feature_index = get_feature_index(fd, device_index, FEATURE_UNIFIED_BATTERY)
+
+        if feature_index is None:
+            print('{"text": ""}')
+            sys.exit(0)
+
+        # Get battery status
+        battery = get_battery_unified(fd, device_index, feature_index)
+
+        if battery and battery['percentage'] > 0:
+            pct = battery['percentage']
+
+            if pct <= 10:
+                cls = "critical"
+            elif pct <= 20:
+                cls = "warning"
+            else:
+                cls = "normal"
+
+            print(f'{{"text": "󰋎 {pct}%", "tooltip": "PRO X 2 Headset: {pct}%", "class": "{cls}", "percentage": {pct}}}')
+        else:
+            print('{"text": ""}')
+
+    finally:
+        os.close(fd)
+
+if __name__ == "__main__":
+    main()

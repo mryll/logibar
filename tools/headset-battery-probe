@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+"""
+Probe Logitech PRO X 2 headset for battery features
+Uses HID++ 2.0 protocol
+"""
+import os
+import sys
+import select
+import time
+
+# Constants
+HIDRAW = "/dev/hidraw0"
+TIMEOUT = 0.3
+
+# Feature IDs to try
+FEATURES = {
+    0x0000: "ROOT",
+    0x1004: "UNIFIED_BATTERY",
+    0x1F20: "ADC_MEASUREMENT",
+    0x1000: "BATTERY_STATUS",
+    0x1001: "BATTERY_VOLTAGE",
+}
+
+def send_recv(fd, data, timeout=TIMEOUT):
+    """Send data and receive response with timeout"""
+    try:
+        os.write(fd, data)
+    except:
+        return None
+
+    # Use select for timeout
+    rlist, _, _ = select.select([fd], [], [], timeout)
+    if not rlist:
+        return None
+
+    try:
+        return os.read(fd, 64)
+    except:
+        return None
+
+def get_feature_index(fd, device_idx, feature_id):
+    """Query ROOT (index 0) for feature index"""
+    msg = bytes([
+        0x10,  # Short report
+        device_idx,
+        0x00,  # ROOT feature index
+        0x0F,  # Function 0, SW ID 0xF
+        (feature_id >> 8) & 0xFF,
+        feature_id & 0xFF,
+        0x00
+    ])
+
+    resp = send_recv(fd, msg)
+    if resp and len(resp) >= 5:
+        # Check for error (feature index 0xFF means error)
+        if resp[2] == 0xFF:
+            return None
+        return resp[4]
+    return None
+
+def query_battery(fd, device_idx, feature_idx, feature_name):
+    """Try to query battery from a feature"""
+    # Try function 0x00 (usually getCapabilities or getStatus)
+    for func in [0x00, 0x01, 0x10]:
+        msg = bytes([
+            0x10,
+            device_idx,
+            feature_idx,
+            (func << 4) | 0x0F,
+            0x00, 0x00, 0x00
+        ])
+
+        resp = send_recv(fd, msg)
+        if resp and len(resp) >= 8:
+            print(f"  Function 0x{func:02X}: {resp[4:12].hex()}")
+
+def main():
+    print(f"Opening {HIDRAW}...")
+
+    try:
+        fd = os.open(HIDRAW, os.O_RDWR | os.O_NONBLOCK)
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    try:
+        # Try different device indices
+        for dev_idx in [0xFF, 0x01, 0x00]:
+            print(f"\n=== Device Index 0x{dev_idx:02X} ===")
+
+            for feat_id, feat_name in FEATURES.items():
+                idx = get_feature_index(fd, dev_idx, feat_id)
+                if idx and idx != 0:
+                    print(f"Found {feat_name} (0x{feat_id:04X}) at index {idx}")
+                    query_battery(fd, dev_idx, idx, feat_name)
+
+    finally:
+        os.close(fd)
+        print("\nDone.")
+
+if __name__ == "__main__":
+    main()

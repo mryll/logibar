@@ -1,0 +1,39 @@
+#!/bin/bash
+# Logitech PRO X Superlight 2 Battery Widget for Waybar
+
+STATE_FILE="${XDG_RUNTIME_DIR:-/run/user/$UID}/logitech-battery/mouse"
+ICON="󰍽"
+ICON_CHARGING="󰍽 ⚡"
+TOOLTIP="PRO X Superlight 2"
+
+if [[ ! -f "$STATE_FILE" ]]; then
+    echo '{"text": ""}'
+    exit 0
+fi
+
+BATTERY=$(sed -n '1p' "$STATE_FILE")
+CONNECTED=$(sed -n '2p' "$STATE_FILE")
+CHARGING=$(sed -n '3p' "$STATE_FILE")
+
+if [[ -z "$BATTERY" ]] || [[ "$BATTERY" == "0" ]] || [[ "$CONNECTED" != "1" ]]; then
+    echo '{"text": ""}'
+    exit 0
+fi
+
+if [[ $BATTERY -le 10 ]]; then
+    CLASS="critical"
+elif [[ $BATTERY -le 20 ]]; then
+    CLASS="warning"
+else
+    CLASS="normal"
+fi
+
+if [[ "$CHARGING" == "1" ]]; then
+    DISPLAY_ICON="$ICON_CHARGING"
+    TOOLTIP_STATUS="$TOOLTIP: $BATTERY% (charging)"
+else
+    DISPLAY_ICON="$ICON"
+    TOOLTIP_STATUS="$TOOLTIP: $BATTERY%"
+fi
+
+echo "{\"text\": \"$DISPLAY_ICON <span size='small'>$BATTERY%</span>\", \"tooltip\": \"$TOOLTIP_STATUS\", \"class\": \"$CLASS\", \"percentage\": $BATTERY}"

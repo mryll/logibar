@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""
+PRO X 2 LIGHTSPEED Battery Monitor Daemon
+- Listens passively for on/off events (instant detection)
+- Polls battery on-demand when headset is on
+"""
+import hid
+import time
+import signal
+import os
+import subprocess
+import tempfile
+
+VID = 0x046d
+PID = 0x0af7
+STATE_DIR = os.path.join(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}'), 'logitech-battery')
+STATE_FILE = os.path.join(STATE_DIR, 'headset')
+POLL_INTERVAL = 60  # seconds between battery polls when headset is on
+
+# Comando para solicitar bateria
+BATTERY_REQUEST = bytes.fromhex('510800031a000300040a' + '00' * 54)
+
+running = True
+last_battery = None
+last_charging = None
+headset_on = False
+last_written_state = None
+
+def signal_handler(sig, frame):
+    global running
+    running = False
+
+def write_state(battery, connected, charging):
+    """Atomic write with deduplication."""
+    global last_written_state
+
+    os.makedirs(STATE_DIR, exist_ok=True, mode=0o700)
+    new_state = f"{battery}\n{1 if connected else 0}\n{1 if charging else 0}"
+
+    # Skip if state hasn't changed
+    if new_state == last_written_state:
+        return
+
+    last_written_state = new_state
+
+    try:
+        # Atomic write: temp file + rename
+        fd, tmp_path = tempfile.mkstemp(dir=STATE_DIR)
+        try:
+            os.write(fd, new_state.encode())
+            os.close(fd)
+            os.rename(tmp_path, STATE_FILE)
+        except:
+            os.close(fd)
+            os.unlink(tmp_path)
+            raise
+
+        subprocess.run(["pkill", "-RTMIN+8", "waybar"], stderr=subprocess.DEVNULL)
+    except:
+        pass
+
+def request_battery(dev):
+    """Send battery request and read response. Returns (battery, charging) or (None, None)"""
+    global last_battery, last_charging
+
+    try:
+        dev.write(list(BATTERY_REQUEST))
+
+        for _ in range(20):
+            resp = dev.read(64, timeout_ms=100)
+            if resp and len(resp) > 12:
+                if resp[0] == 0x51 and resp[1] == 0x0b and resp[8] == 0x04:
+                    if 0 < resp[10] <= 100:
+                        last_battery = resp[10]
+                        last_charging = resp[12] == 0x02
+                        return last_battery, last_charging
+    except:
+        pass
+
+    return None, None
+
+def main():
+    global running, headset_on, last_battery, last_charging
+
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    os.makedirs(STATE_DIR, exist_ok=True, mode=0o700)
+
+    while running:
+        try:
+            # Find device
+            devices = [d for d in hid.enumerate(VID, PID) if d['usage_page'] == 0xffa0]
+            if not devices:
+                write_state(0, False, False)
+                headset_on = False
+                time.sleep(5)
+                continue
+
+            dev = hid.device()
+            dev.open_path(devices[0]['path'])
+            # NO set_nonblocking - blocking read with timeout is correct
+
+            last_poll = 0
+
+            while running:
+                # Blocking read with timeout - true event-driven
+                resp = dev.read(64, timeout_ms=1000)
+
+                if resp and len(resp) > 6:
+                    # On/Off packet: 51 05 00 03 00 00 XX 00
+                    # XX = 00: off, 01: on
+                    if resp[0] == 0x51 and resp[1] == 0x05:
+                        was_on = headset_on
+                        headset_on = resp[6] == 0x01
+
+                        if headset_on and not was_on:
+                            # Just turned ON - request battery immediately
+                            battery, charging = request_battery(dev)
+                            if battery:
+                                write_state(battery, True, charging)
+                        elif not headset_on and was_on:
+                            # Just turned OFF
+                            write_state(0, False, False)
+                            last_battery = None
+
+                    # Battery response (from our poll)
+                    elif resp[0] == 0x51 and resp[1] == 0x0b and resp[8] == 0x04:
+                        if len(resp) > 12 and 0 < resp[10] <= 100:
+                            last_battery = resp[10]
+                            last_charging = resp[12] == 0x02
+                            headset_on = True
+                            write_state(last_battery, True, last_charging)
+
+                # Periodic battery poll (every POLL_INTERVAL seconds)
+                now = time.time()
+                if headset_on and (now - last_poll) >= POLL_INTERVAL:
+                    battery, charging = request_battery(dev)
+                    if battery:
+                        write_state(battery, True, charging)
+                    last_poll = now
+
+                # If we haven't confirmed headset is on, try polling
+                if not headset_on and (now - last_poll) >= 5:
+                    battery, charging = request_battery(dev)
+                    if battery:
+                        headset_on = True
+                        write_state(battery, True, charging)
+                    last_poll = now
+
+            dev.close()
+
+        except Exception:
+            write_state(0, False, False)
+            headset_on = False
+            time.sleep(5)
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,12 @@
+[Unit]
+Description=Logitech PRO X 2 Headset Battery Monitor
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/logitech-headset-monitor
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

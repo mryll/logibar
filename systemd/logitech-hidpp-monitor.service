@@ -1,0 +1,12 @@
+[Unit]
+Description=Logitech HID++ Battery Monitor (Keyboard/Mouse)
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/logitech-hidpp-monitor
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

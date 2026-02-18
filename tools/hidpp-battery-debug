@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""Debug version of HID++ battery reader"""
+
+import os
+import sys
+import struct
+import time
+
+HIDPP_SHORT = 0x10
+HIDPP_LONG = 0x11
+FEATURE_ROOT = 0x0000
+FEATURE_UNIFIED_BATTERY = 0x1004
+
+def open_hidraw(path):
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+        print(f"[DEBUG] Opened {path} successfully")
+        return fd
+    except Exception as e:
+        print(f"[DEBUG] Error opening {path}: {e}")
+        return None
+
+def hidpp_request(fd, device_index, feature_index, function, params=None):
+    if params is None:
+        params = []
+
+    # Try both short and long messages
+    for report_id in [HIDPP_SHORT, HIDPP_LONG]:
+        if report_id == HIDPP_SHORT:
+            msg_len = 7
+        else:
+            msg_len = 20
+
+        msg = bytes([
+            report_id,
+            device_index,
+            feature_index,
+            (function << 4) | 0x0F,
+        ] + params + [0] * (msg_len - 4 - len(params)))
+
+        print(f"[DEBUG] Sending ({report_id:#x}): {msg.hex()}")
+
+        try:
+            written = os.write(fd, msg)
+            print(f"[DEBUG] Wrote {written} bytes")
+        except Exception as e:
+            print(f"[DEBUG] Write error: {e}")
+            continue
+
+        # Read response
+        for _ in range(5):
+            time.sleep(0.05)
+            try:
+                response = os.read(fd, 64)
+                print(f"[DEBUG] Response: {response.hex()}")
+
+                # Check for error response
+                if len(response) >= 5 and response[2] == 0xFF:
+                    error_code = response[4] if len(response) > 4 else 0
+                    print(f"[DEBUG] Error response, code: {error_code:#x}")
+                    break
+
+                return response
+            except BlockingIOError:
+                continue
+            except Exception as e:
+                print(f"[DEBUG] Read error: {e}")
+                break
+
+    return None
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: hidpp-battery-debug <hidraw_device>")
+        sys.exit(1)
+
+    hidraw_path = sys.argv[1]
+    fd = open_hidraw(hidraw_path)
+    if fd is None:
+        sys.exit(1)
+
+    try:
+        # Try different device indices
+        for device_index in [0xFF, 0x01, 0x00]:
+            print(f"\n[DEBUG] === Trying device_index {device_index:#x} ===")
+
+            # Query ROOT feature (always at index 0) for UNIFIED_BATTERY
+            print(f"[DEBUG] Querying ROOT for UNIFIED_BATTERY ({FEATURE_UNIFIED_BATTERY:#x})")
+            params = [(FEATURE_UNIFIED_BATTERY >> 8) & 0xFF, FEATURE_UNIFIED_BATTERY & 0xFF]
+            response = hidpp_request(fd, device_index, 0, 0, params)
+
+            if response and len(response) >= 5 and response[4] != 0:
+                feature_index = response[4]
+                print(f"[DEBUG] Found UNIFIED_BATTERY at index {feature_index}")
+
+                # Query battery
+                print(f"[DEBUG] Querying battery status")
+                battery_resp = hidpp_request(fd, device_index, feature_index, 0x01)
+
+                if battery_resp and len(battery_resp) >= 8:
+                    discharge = battery_resp[4]
+                    level = battery_resp[5]
+                    status = battery_resp[6]
+                    print(f"[DEBUG] Battery: {discharge}%, level={level}, status={status}")
+
+    finally:
+        os.close(fd)
+
+if __name__ == "__main__":
+    main()
