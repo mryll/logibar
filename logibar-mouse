@@ -1,16 +1,54 @@
 #!/bin/bash
 # Logitech PRO X Superlight 2 Battery Widget for Waybar
+#
+# Usage: logibar-mouse [--color-normal HEX] [--color-warning HEX] [--color-critical HEX]
 
 STATE_FILE="${XDG_RUNTIME_DIR:-/run/user/$UID}/logibar/mouse"
 ICON="󰍽"
 ICON_CHARGING="󰍽 ⚡"
 TOOLTIP="PRO X Superlight 2"
 
-# Default colors (One Dark)
+# --- Parse args ---
+CLI_COLOR_NORMAL=""
+CLI_COLOR_WARNING=""
+CLI_COLOR_CRITICAL=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --color-normal)   [[ $# -ge 2 ]] || { echo '{"text":"⚠","tooltip":"--color-normal requires a value","class":"critical"}'; exit 0; }
+                          CLI_COLOR_NORMAL="$2"; shift 2 ;;
+        --color-warning)  [[ $# -ge 2 ]] || { echo '{"text":"⚠","tooltip":"--color-warning requires a value","class":"critical"}'; exit 0; }
+                          CLI_COLOR_WARNING="$2"; shift 2 ;;
+        --color-critical) [[ $# -ge 2 ]] || { echo '{"text":"⚠","tooltip":"--color-critical requires a value","class":"critical"}'; exit 0; }
+                          CLI_COLOR_CRITICAL="$2"; shift 2 ;;
+        *) _o="${1//\\/\\\\}"; _o="${_o//\"/\\\"}"; echo '{"text":"⚠","tooltip":"Unknown option: '"$_o"'","class":"critical"}'; exit 0 ;;
+    esac
+done
+
+# --- Colors: CLI overrides > Omarchy theme > One Dark defaults ---
 COLOR_NORMAL="#98c379"
 COLOR_WARNING="#e5c07b"
 COLOR_CRITICAL="#e06c75"
 
+_theme="$HOME/.config/omarchy/current/theme/colors.toml"
+if [[ -f "$_theme" ]]; then
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${line// /}" ]] && continue
+        if [[ "$line" =~ ^[[:space:]]*([a-zA-Z_][a-zA-Z0-9_]*)[[:space:]]*=[[:space:]]*\"([^\"]*)\" ]]; then
+            case "${BASH_REMATCH[1]}" in
+                color1) COLOR_CRITICAL="${BASH_REMATCH[2]}" ;;
+                color2) COLOR_NORMAL="${BASH_REMATCH[2]}" ;;
+                color3) COLOR_WARNING="${BASH_REMATCH[2]}" ;;
+            esac
+        fi
+    done < "$_theme"
+fi
+
+[[ -n "$CLI_COLOR_NORMAL" ]]   && COLOR_NORMAL="$CLI_COLOR_NORMAL"
+[[ -n "$CLI_COLOR_WARNING" ]]  && COLOR_WARNING="$CLI_COLOR_WARNING"
+[[ -n "$CLI_COLOR_CRITICAL" ]] && COLOR_CRITICAL="$CLI_COLOR_CRITICAL"
+
+# --- Read state ---
 if [[ ! -f "$STATE_FILE" ]]; then
     echo '{"text": ""}'
     exit 0

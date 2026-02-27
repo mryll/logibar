@@ -10,7 +10,7 @@ Waybar widgets that show battery level for Logitech wireless peripherals -- keyb
 - Event-driven -- updates instantly on connect/disconnect/charge events, no polling
 - Two background daemons: one for keyboard/mouse (HID++ 2.0), one for headset (custom HID protocol)
 - Waybar widgets hide automatically when a device is disconnected
-- CSS classes for color-coded battery levels (normal/warning/critical)
+- Color-coded battery levels (normal/warning/critical) with Omarchy theme support
 - Atomic state file writes -- no corruption on concurrent reads
 - systemd user services for automatic startup
 
@@ -122,7 +122,18 @@ The battery percentage is colored by level out of the box (One Dark palette):
 |---|---|---|
 | `normal` | >20% | `#98c379` (green) |
 | `warning` | 11-20% | `#e5c07b` (yellow) |
-| `critical` | 0-10% | `#e06c75` (red) |
+| `critical` | 1-10% | `#e06c75` (red) |
+
+To override, pass `--color-*` flags in the `exec` field:
+
+```jsonc
+"custom/logibar-keyboard": {
+    "exec": "logibar-keyboard --color-normal '#50fa7b' --color-critical '#ff5555'",
+    ...
+}
+```
+
+Available flags: `--color-normal`, `--color-warning`, `--color-critical`.
 
 CSS classes (`normal`, `warning`, `critical`) are also emitted for additional styling via `~/.config/waybar/style.css`.
 
@@ -221,7 +232,7 @@ The PRO X 2 LIGHTSPEED headset does **not** use the standard HID++ UNIFIED_BATTE
 
 ### Widget Scripts
 
-All three widget scripts are identical Bash scripts (~40 lines) that:
+All three widget scripts are identical Bash scripts that:
 
 1. Read the 3-line state file from `$XDG_RUNTIME_DIR/logibar/{device}`
 2. If disconnected or no battery data, output `{"text": ""}` (Waybar hides the widget)
