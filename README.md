@@ -114,33 +114,17 @@ Add the modules to `~/.config/waybar/config.jsonc`:
 }
 ```
 
-Add to `~/.config/waybar/style.css`:
+### Colors
 
-```css
-#custom-logibar-keyboard,
-#custom-logibar-mouse,
-#custom-logibar-headset {
-    margin: 0 5px;
-}
+The battery percentage is colored by level out of the box (One Dark palette):
 
-#custom-logibar-keyboard.warning,
-#custom-logibar-mouse.warning,
-#custom-logibar-headset.warning {
-    color: #e5c07b;
-}
+| Class | Range | Default color |
+|---|---|---|
+| `normal` | >20% | `#98c379` (green) |
+| `warning` | 11-20% | `#e5c07b` (yellow) |
+| `critical` | 0-10% | `#e06c75` (red) |
 
-#custom-logibar-keyboard.critical,
-#custom-logibar-mouse.critical,
-#custom-logibar-headset.critical {
-    color: #e06c75;
-}
-```
-
-Then restart Waybar:
-
-```bash
-killall waybar && waybar &
-```
+CSS classes (`normal`, `warning`, `critical`) are also emitted for additional styling via `~/.config/waybar/style.css`.
 
 ## How it works
 

@@ -6,6 +6,11 @@ ICON="󰋎"
 ICON_CHARGING="󰋎 ⚡"
 TOOLTIP="PRO X 2 Headset"
 
+# Default colors (One Dark)
+COLOR_NORMAL="#98c379"
+COLOR_WARNING="#e5c07b"
+COLOR_CRITICAL="#e06c75"
+
 if [[ ! -f "$STATE_FILE" ]]; then
     echo '{"text": ""}'
     exit 0
@@ -15,22 +20,19 @@ BATTERY=$(sed -n '1p' "$STATE_FILE")
 CONNECTED=$(sed -n '2p' "$STATE_FILE")
 CHARGING=$(sed -n '3p' "$STATE_FILE")
 
-# If not connected or no battery, show nothing
 if [[ -z "$BATTERY" ]] || [[ "$BATTERY" == "0" ]] || [[ "$CONNECTED" != "1" ]]; then
     echo '{"text": ""}'
     exit 0
 fi
 
-# Determine CSS class based on battery level
 if [[ $BATTERY -le 10 ]]; then
-    CLASS="critical"
+    CLASS="critical"; COLOR="$COLOR_CRITICAL"
 elif [[ $BATTERY -le 20 ]]; then
-    CLASS="warning"
+    CLASS="warning"; COLOR="$COLOR_WARNING"
 else
-    CLASS="normal"
+    CLASS="normal"; COLOR="$COLOR_NORMAL"
 fi
 
-# Set icon and tooltip based on charging status
 if [[ "$CHARGING" == "1" ]]; then
     DISPLAY_ICON="$ICON_CHARGING"
     TOOLTIP_STATUS="$TOOLTIP: $BATTERY% (charging)"
@@ -39,4 +41,4 @@ else
     TOOLTIP_STATUS="$TOOLTIP: $BATTERY%"
 fi
 
-echo "{\"text\": \"$DISPLAY_ICON <span size='small'>$BATTERY%</span>\", \"tooltip\": \"$TOOLTIP_STATUS\", \"class\": \"$CLASS\", \"percentage\": $BATTERY}"
+echo "{\"text\": \"$DISPLAY_ICON <span size='small' foreground='${COLOR}'>$BATTERY%</span>\", \"tooltip\": \"$TOOLTIP_STATUS\", \"class\": \"$CLASS\", \"percentage\": $BATTERY}"
