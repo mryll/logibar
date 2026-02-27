@@ -45,7 +45,13 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 
 ## Installation
 
-### Quick install
+### Arch Linux (AUR)
+
+```bash
+yay -S logibar
+```
+
+### From source
 
 ```bash
 git clone https://github.com/mryll/logibar.git
@@ -86,21 +92,21 @@ Add the modules to `~/.config/waybar/config.jsonc`:
 "modules-right": ["custom/logibar-keyboard", "custom/logibar-mouse", "custom/logibar-headset", ...],
 
 "custom/logibar-keyboard": {
-    "exec": "~/.local/bin/logibar-keyboard",
+    "exec": "logibar-keyboard",
     "return-type": "json",
     "interval": "once",
     "signal": 9,
     "tooltip": true
 },
 "custom/logibar-mouse": {
-    "exec": "~/.local/bin/logibar-mouse",
+    "exec": "logibar-mouse",
     "return-type": "json",
     "interval": "once",
     "signal": 10,
     "tooltip": true
 },
 "custom/logibar-headset": {
-    "exec": "~/.local/bin/logibar-headset",
+    "exec": "logibar-headset",
     "return-type": "json",
     "interval": "once",
     "signal": 8,
