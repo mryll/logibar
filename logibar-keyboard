@@ -68,7 +68,7 @@ if [[ $BATTERY -le 10 ]]; then
 elif [[ $BATTERY -le 20 ]]; then
     CLASS="warning"; COLOR="$COLOR_WARNING"
 else
-    CLASS="normal"; COLOR="$COLOR_NORMAL"
+    CLASS="normal"; COLOR=""
 fi
 
 if [[ "$CHARGING" == "1" ]]; then
@@ -79,4 +79,10 @@ else
     TOOLTIP_STATUS="$TOOLTIP: $BATTERY%"
 fi
 
-echo "{\"text\": \"$DISPLAY_ICON <span size='small' foreground='${COLOR}'>$BATTERY%</span>\", \"tooltip\": \"$TOOLTIP_STATUS\", \"class\": \"$CLASS\", \"percentage\": $BATTERY}"
+if [[ -n "$COLOR" ]]; then
+    BATTERY_TEXT="<span size='small' foreground='${COLOR}'>$BATTERY%</span>"
+else
+    BATTERY_TEXT="<span size='small'>$BATTERY%</span>"
+fi
+
+echo "{\"text\": \"$DISPLAY_ICON ${BATTERY_TEXT}\", \"tooltip\": \"$TOOLTIP_STATUS\", \"class\": \"$CLASS\", \"percentage\": $BATTERY}"
