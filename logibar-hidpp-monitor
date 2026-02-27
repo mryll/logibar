@@ -13,7 +13,7 @@ import tempfile
 
 VID = 0x046d
 # Use XDG_RUNTIME_DIR for secure, atomic state files
-STATE_DIR = os.path.join(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}'), 'logitech-battery')
+STATE_DIR = os.path.join(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}'), 'logibar')
 
 # HID++ 1.0
 RECEIVER_IDX = 0xff

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Logitech PRO X Superlight 2 Battery Widget for Waybar
 
-STATE_FILE="${XDG_RUNTIME_DIR:-/run/user/$UID}/logitech-battery/mouse"
+STATE_FILE="${XDG_RUNTIME_DIR:-/run/user/$UID}/logibar/mouse"
 ICON="󰍽"
 ICON_CHARGING="󰍽 ⚡"
 TOOLTIP="PRO X Superlight 2"

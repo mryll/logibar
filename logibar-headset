@@ -1,10 +1,10 @@
 #!/bin/bash
-# Logitech G915 X TKL Battery Widget for Waybar
+# Logitech PRO X 2 LIGHTSPEED Battery Widget for Waybar
 
-STATE_FILE="${XDG_RUNTIME_DIR:-/run/user/$UID}/logitech-battery/keyboard"
-ICON="󰌌"
-ICON_CHARGING="󰌌 ⚡"
-TOOLTIP="G915 X TKL"
+STATE_FILE="${XDG_RUNTIME_DIR:-/run/user/$UID}/logibar/headset"
+ICON="󰋎"
+ICON_CHARGING="󰋎 ⚡"
+TOOLTIP="PRO X 2 Headset"
 
 if [[ ! -f "$STATE_FILE" ]]; then
     echo '{"text": ""}'
@@ -15,11 +15,13 @@ BATTERY=$(sed -n '1p' "$STATE_FILE")
 CONNECTED=$(sed -n '2p' "$STATE_FILE")
 CHARGING=$(sed -n '3p' "$STATE_FILE")
 
+# If not connected or no battery, show nothing
 if [[ -z "$BATTERY" ]] || [[ "$BATTERY" == "0" ]] || [[ "$CONNECTED" != "1" ]]; then
     echo '{"text": ""}'
     exit 0
 fi
 
+# Determine CSS class based on battery level
 if [[ $BATTERY -le 10 ]]; then
     CLASS="critical"
 elif [[ $BATTERY -le 20 ]]; then
@@ -28,6 +30,7 @@ else
     CLASS="normal"
 fi
 
+# Set icon and tooltip based on charging status
 if [[ "$CHARGING" == "1" ]]; then
     DISPLAY_ICON="$ICON_CHARGING"
     TOOLTIP_STATUS="$TOOLTIP: $BATTERY% (charging)"

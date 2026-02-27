@@ -1,10 +1,10 @@
 [Unit]
-Description=Logitech HID++ Battery Monitor (Keyboard/Mouse)
+Description=Logibar HID++ Battery Monitor (Keyboard/Mouse)
 After=default.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/logitech-hidpp-monitor
+ExecStart=%h/.local/bin/logibar-hidpp-monitor
 Restart=always
 RestartSec=5
 

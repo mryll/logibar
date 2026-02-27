@@ -1,4 +1,4 @@
-# waybar-logitech-battery
+# logibar
 
 Waybar widgets that show battery level for Logitech wireless peripherals -- keyboard, mouse, and headset -- with event-driven updates and systemd integration.
 
@@ -18,9 +18,9 @@ Waybar widgets that show battery level for Logitech wireless peripherals -- keyb
 
 | Device | Type | Daemon |
 |---|---|---|
-| G915 X TKL | Keyboard | `logitech-hidpp-monitor` |
-| PRO X Superlight 2 | Mouse | `logitech-hidpp-monitor` |
-| PRO X 2 LIGHTSPEED | Headset | `logitech-headset-monitor` |
+| G915 X TKL | Keyboard | `logibar-hidpp-monitor` |
+| PRO X Superlight 2 | Mouse | `logibar-hidpp-monitor` |
+| PRO X 2 LIGHTSPEED | Headset | `logibar-headset-monitor` |
 
 Adding other Logitech Lightspeed devices is straightforward -- see [Adding Devices](#adding-devices).
 
@@ -48,8 +48,8 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 ### Quick install
 
 ```bash
-git clone https://github.com/mryll/waybar-logitech-battery.git
-cd waybar-logitech-battery
+git clone https://github.com/mryll/logibar.git
+cd logibar
 make install PREFIX=~/.local
 make install-systemd
 ```
@@ -83,24 +83,24 @@ make uninstall-systemd
 Add the modules to `~/.config/waybar/config.jsonc`:
 
 ```jsonc
-"modules-right": ["custom/logitech-keyboard", "custom/logitech-mouse", "custom/logitech-headset", ...],
+"modules-right": ["custom/logibar-keyboard", "custom/logibar-mouse", "custom/logibar-headset", ...],
 
-"custom/logitech-keyboard": {
-    "exec": "~/.local/bin/logitech-battery-keyboard",
+"custom/logibar-keyboard": {
+    "exec": "~/.local/bin/logibar-keyboard",
     "return-type": "json",
     "interval": "once",
     "signal": 9,
     "tooltip": true
 },
-"custom/logitech-mouse": {
-    "exec": "~/.local/bin/logitech-battery-mouse",
+"custom/logibar-mouse": {
+    "exec": "~/.local/bin/logibar-mouse",
     "return-type": "json",
     "interval": "once",
     "signal": 10,
     "tooltip": true
 },
-"custom/logitech-headset": {
-    "exec": "~/.local/bin/logitech-battery-headset",
+"custom/logibar-headset": {
+    "exec": "~/.local/bin/logibar-headset",
     "return-type": "json",
     "interval": "once",
     "signal": 8,
@@ -111,21 +111,21 @@ Add the modules to `~/.config/waybar/config.jsonc`:
 Add to `~/.config/waybar/style.css`:
 
 ```css
-#custom-logitech-keyboard,
-#custom-logitech-mouse,
-#custom-logitech-headset {
+#custom-logibar-keyboard,
+#custom-logibar-mouse,
+#custom-logibar-headset {
     margin: 0 5px;
 }
 
-#custom-logitech-keyboard.warning,
-#custom-logitech-mouse.warning,
-#custom-logitech-headset.warning {
+#custom-logibar-keyboard.warning,
+#custom-logibar-mouse.warning,
+#custom-logibar-headset.warning {
     color: #e5c07b;
 }
 
-#custom-logitech-keyboard.critical,
-#custom-logitech-mouse.critical,
-#custom-logitech-headset.critical {
+#custom-logibar-keyboard.critical,
+#custom-logibar-mouse.critical,
+#custom-logibar-headset.critical {
     color: #e06c75;
 }
 ```
@@ -143,25 +143,25 @@ killall waybar && waybar &
 The system uses a **daemon + widget** pattern:
 
 ```
-┌─────────────────────┐     state files      ┌─────────────────────┐
-│  logitech-hidpp-    │──→ keyboard, mouse ──→│  logitech-battery-  │
-│  monitor (Python)   │    ($XDG_RUNTIME_DIR/ │  keyboard/mouse     │──→ Waybar
-│                     │     logitech-battery/) │  (Bash widgets)     │
-└─────────────────────┘                       └─────────────────────┘
-┌─────────────────────┐     state file        ┌─────────────────────┐
-│  logitech-headset-  │──→ headset ──────────→│  logitech-battery-  │
-│  monitor (Python)   │                       │  headset             │──→ Waybar
-└─────────────────────┘                       └─────────────────────┘
+┌──────────────────────┐    state files     ┌───────────────────┐
+│  logibar-hidpp-      │──→ keyboard,mouse ─→│  logibar-keyboard │
+│  monitor (Python)    │   ($XDG_RUNTIME_DIR │  logibar-mouse    │──→ Waybar
+│                      │    /logibar/)       │  (Bash widgets)   │
+└──────────────────────┘                     └───────────────────┘
+┌──────────────────────┐    state file       ┌───────────────────┐
+│  logibar-headset-    │──→ headset ────────→│  logibar-headset  │
+│  monitor (Python)    │                     │  (Bash widget)    │──→ Waybar
+└──────────────────────┘                     └───────────────────┘
 ```
 
 1. **Daemons** run as systemd user services, continuously monitoring HID devices
-2. **State files** in `$XDG_RUNTIME_DIR/logitech-battery/` store battery %, connected status, and charging status (3 lines: `battery\nconnected\ncharging`)
+2. **State files** in `$XDG_RUNTIME_DIR/logibar/` store battery %, connected status, and charging status (3 lines: `battery\nconnected\ncharging`)
 3. **Widget scripts** read the state file and output JSON for Waybar
 4. Daemons signal Waybar via `SIGRTMIN+N` for instant updates (no polling interval needed)
 
 ### Keyboard & Mouse: HID++ 2.0 Protocol
 
-The `logitech-hidpp-monitor` daemon uses the standard **Logitech HID++ 2.0** protocol to monitor keyboard and mouse battery. This is the same protocol used by [Solaar](https://github.com/pwr-Solaar/Solaar), but implemented directly via hidapi without needing the Solaar daemon.
+The `logibar-hidpp-monitor` daemon uses the standard **Logitech HID++ 2.0** protocol to monitor keyboard and mouse battery. This is the same protocol used by [Solaar](https://github.com/pwr-Solaar/Solaar), but implemented directly via hidapi without needing the Solaar daemon.
 
 **How HID++ 2.0 battery reading works:**
 
@@ -233,7 +233,7 @@ The PRO X 2 LIGHTSPEED headset does **not** use the standard HID++ UNIFIED_BATTE
 
 All three widget scripts are identical Bash scripts (~40 lines) that:
 
-1. Read the 3-line state file from `$XDG_RUNTIME_DIR/logitech-battery/{device}`
+1. Read the 3-line state file from `$XDG_RUNTIME_DIR/logibar/{device}`
 2. If disconnected or no battery data, output `{"text": ""}` (Waybar hides the widget)
 3. Determine CSS class: `critical` (<=10%), `warning` (<=20%), `normal` (>20%)
 4. Output JSON with Nerd Font icon, battery percentage, tooltip, and class
@@ -247,7 +247,7 @@ To add a new Logitech device to the keyboard/mouse daemon:
    lsusb | grep 046d
    ```
 
-2. Edit `logitech-hidpp-monitor` and add an entry to the `DEVICES` list:
+2. Edit `logibar-hidpp-monitor` and add an entry to the `DEVICES` list:
    ```python
    DEVICES = [
        (0xc547, 0xc357, "keyboard", 9),   # G915 X TKL
@@ -256,30 +256,30 @@ To add a new Logitech device to the keyboard/mouse daemon:
    ]
    ```
 
-3. Create a new widget script (copy `logitech-battery-keyboard` and change the icon, tooltip text, and state file name).
+3. Create a new widget script (copy `logibar-keyboard` and change the icon, tooltip text, and state file name).
 
 4. Add the new Waybar module with the matching signal number.
 
 The `tools/` directory contains utilities to help identify the correct PIDs and verify HID++ support:
-- `hidpp-battery <hidraw_device>` -- read battery from any HID++ 2.0 device
-- `hidpp-battery-debug <hidraw_device>` -- verbose version that tries multiple device indices
-- `headset-battery-probe` -- probe available HID++ features on a device
+- `logibar-hidpp-battery <hidraw_device>` -- read battery from any HID++ 2.0 device
+- `logibar-hidpp-debug <hidraw_device>` -- verbose version that tries multiple device indices
+- `logibar-headset-probe` -- probe available HID++ features on a device
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Widget never appears | Daemon not running | `systemctl --user status logitech-hidpp-monitor` |
+| Widget never appears | Daemon not running | `systemctl --user status logibar-hidpp-monitor` |
 | Widget shows nothing | Device disconnected | Turn on / wake up the device |
 | Permission denied in journal | No hidraw access | Set up the udev rule (see [Requirements](#hid-device-permissions)) |
-| Battery stuck at old value | State file stale | Restart daemon: `systemctl --user restart logitech-hidpp-monitor` |
+| Battery stuck at old value | State file stale | Restart daemon: `systemctl --user restart logibar-hidpp-monitor` |
 | Headset widget not updating | Wrong hidraw device | Check `ls /dev/hidraw*` and verify the PID matches |
 
 Check daemon logs:
 
 ```bash
-journalctl --user -u logitech-hidpp-monitor -f
-journalctl --user -u logitech-headset-monitor -f
+journalctl --user -u logibar-hidpp-monitor -f
+journalctl --user -u logibar-headset-monitor -f
 ```
 
 ## License
@@ -290,5 +290,5 @@ journalctl --user -u logitech-headset-monitor -f
 
 - [Solaar](https://github.com/pwr-Solaar/Solaar) -- Full-featured Logitech device manager (much heavier, GUI-based)
 - [Waybar](https://github.com/Alexays/Waybar) -- Status bar for Wayland compositors
-- [waybar-claude-usage](https://github.com/mryll/waybar-claude-usage) -- Claude AI usage widget for Waybar
-- [waybar-codex-usage](https://github.com/mryll/waybar-codex-usage) -- OpenAI Codex usage widget for Waybar
+- [claudebar](https://github.com/mryll/claudebar) -- Claude AI usage widget for Waybar
+- [codexbar](https://github.com/mryll/codexbar) -- OpenAI Codex usage widget for Waybar
