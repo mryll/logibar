@@ -322,4 +322,5 @@ journalctl --user -u logibar-headset-monitor -f
 - [codexbar](https://github.com/mryll/codexbar) — OpenAI Codex usage widget for Waybar
 - [meteobar](https://github.com/mryll/meteobar) — Weather widget for Waybar (Open-Meteo)
 - [Solaar](https://github.com/pwr-Solaar/Solaar) — Full-featured Logitech device manager (much heavier, GUI-based)
+- [Omarchy](https://github.com/basecamp/omarchy) — Beautiful, modern & opinionated Linux distribution
 - [Waybar](https://github.com/Alexays/Waybar) — Status bar for Wayland compositors
