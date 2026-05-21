@@ -1,2 +1,0 @@
-# Logitech HID++ devices -- allow user access for battery monitoring
-KERNEL=="hidraw*", ATTRS{idVendor}=="046d", MODE="0660", TAG+="uaccess"

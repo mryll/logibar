@@ -1,0 +1,6 @@
+# Logitech HID++ devices -- allow user access for battery monitoring
+#
+# The filename prefix MUST sort before systemd's 73-seat-late.rules, which runs
+# the "uaccess" builtin that applies the ACL. With a "99-" prefix the TAG is set
+# too late and the ACL is never granted (the hidraw node stays root-only).
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", MODE="0660", TAG+="uaccess"

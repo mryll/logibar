@@ -39,12 +39,16 @@ Adding other Logitech Lightspeed devices is straightforward — see [Adding devi
 The daemons need read/write access to `/dev/hidraw*` devices. The AUR package includes this rule automatically. For manual installs, create it yourself:
 
 ```bash
-sudo tee /etc/udev/rules.d/99-logitech-hidraw.rules << 'EOF'
+sudo tee /etc/udev/rules.d/70-logitech-hidraw.rules << 'EOF'
 # Logitech HID++ devices — allow user access for battery monitoring
 KERNEL=="hidraw*", ATTRS{idVendor}=="046d", MODE="0660", TAG+="uaccess"
 EOF
 sudo udevadm control --reload-rules && sudo udevadm trigger --action=change --subsystem-match=hidraw
 ```
+
+The `70-` prefix matters: the rule must sort before systemd's `73-seat-late.rules`, which applies the `uaccess` ACL. A higher prefix (e.g. `99-`) sets the tag too late and access is never granted.
+
+> **Upgrading:** if you previously installed this rule as `99-logitech-hidraw.rules`, remove the stale file — `sudo rm /etc/udev/rules.d/99-logitech-hidraw.rules`.
 
 ## Installation
 
