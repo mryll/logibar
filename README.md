@@ -32,7 +32,7 @@ Adding other Logitech Lightspeed devices is straightforward — see [Adding devi
 - Python 3
 - [`python-hid`](https://pypi.org/project/hid/) (hidapi bindings) — `pip install hid` or `pacman -S python-hid`
 - [Waybar](https://github.com/Alexays/Waybar)
-- A [Nerd Font](https://www.nerdfonts.com/) for icons
+- A [Nerd Font](https://www.nerdfonts.com/) for icons (recommended; required only for the framed tooltip — see [Framed tooltip](#framed-tooltip))
 
 ### HID device permissions
 
@@ -159,6 +159,16 @@ CSS classes (`normal`, `warning`, `critical`) are also emitted for additional st
 Colors are automatically read from the active [Omarchy](https://github.com/basecamp/omarchy) theme at `~/.config/omarchy/current/theme/colors.toml` on every execution. On non-Omarchy systems, the One Dark palette is used as fallback.
 
 The priority chain is: **CLI flags** (`--color-*`) > **Omarchy theme** > **One Dark defaults**.
+
+### Framed tooltip
+
+By default the tooltip is **plain** (no border) and renders in your Waybar font, so it looks right with any font. Pass `--frame` to each widget to draw the bordered "card" instead:
+
+```bash
+logibar-headset --frame
+```
+
+Framed mode pins `JetBrainsMono Nerd Font Mono` so the box and gauge stay aligned regardless of your bar font — install a Nerd Font Mono (e.g. `ttf-jetbrains-mono-nerd`) for it to render correctly.
 
 ### Spacing
 

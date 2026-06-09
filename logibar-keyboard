@@ -12,6 +12,7 @@ TOOLTIP="G915 X TKL"
 CLI_COLOR_NORMAL=""
 CLI_COLOR_WARNING=""
 CLI_COLOR_CRITICAL=""
+FRAME=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --color-normal)   [[ $# -ge 2 ]] || { echo '{"text":"⚠","tooltip":"--color-normal requires a value","class":"critical"}'; exit 0; }
@@ -20,6 +21,7 @@ while [[ $# -gt 0 ]]; do
                           CLI_COLOR_WARNING="$2"; shift 2 ;;
         --color-critical) [[ $# -ge 2 ]] || { echo '{"text":"⚠","tooltip":"--color-critical requires a value","class":"critical"}'; exit 0; }
                           CLI_COLOR_CRITICAL="$2"; shift 2 ;;
+        --frame) FRAME=true; shift ;;
         *) _o="${1//\\/\\\\}"; _o="${_o//\"/\\\"}"; echo '{"text":"⚠","tooltip":"Unknown option: '"$_o"'","class":"critical"}'; exit 0 ;;
     esac
 done
@@ -128,12 +130,24 @@ _cpad() { local _p; _p=$(strip_tags "$1"); local n=$(( INNER - ${#_p} )); (( n <
 B="<span foreground='${ACCENT}'>"; E="</span>"; NL=$'\n'
 printf -v _border '%*s' "$INNER" ''; _border="${_border// /─}"
 printf -v _sepd '%*s' "$(( INNER - 2 ))" ''; _sepd="${_sepd// /─}"
-TIP="${B}╭${_border}╮${E}${NL}"
-TIP+="${B}│${E}$(_cpad "$title")${B}│${E}${NL}"
-TIP+="${B}│${E}$(_pad " <span foreground='${DIM}'>${_sepd}</span>")${B}│${E}${NL}"
-TIP+="${B}│${E}$(_pad "$row_bar")${B}│${E}${NL}"
-TIP+="${B}│${E}$(_pad "$row_status")${B}│${E}${NL}"
-TIP+="${B}╰${_border}╯${E}"
+if [[ "$FRAME" == "true" ]]; then
+    # Framed: box pinned to a Mono Nerd Font so text/box-drawing/icons share one
+    # uniform advance — alignment holds regardless of the user's bar font.
+    TIP="${B}╭${_border}╮${E}${NL}"
+    TIP+="${B}│${E}$(_cpad "$title")${B}│${E}${NL}"
+    TIP+="${B}│${E}$(_pad " <span foreground='${DIM}'>${_sepd}</span>")${B}│${E}${NL}"
+    TIP+="${B}│${E}$(_pad "$row_bar")${B}│${E}${NL}"
+    TIP+="${B}│${E}$(_pad "$row_status")${B}│${E}${NL}"
+    TIP+="${B}╰${_border}╯${E}"
+    TIP="<span font_family='JetBrainsMono Nerd Font Mono'>${TIP}</span>"
+else
+    # Plain (default): no border, no font pin → renders in the user's font.
+    # Leading space aligns the title with the rule below it.
+    TIP=" ${title}${NL}"
+    TIP+=" <span foreground='${DIM}'>${_sepd}</span>${NL}"
+    TIP+="${row_bar}${NL}"
+    TIP+="${row_status}"
+fi
 
 jq -nc --arg t "$DISPLAY_ICON ${BATTERY_TEXT}" --arg tip "$TIP" --arg class "$CLASS" --argjson pct "$BATTERY" \
     '{text:$t, tooltip:$tip, class:$class, percentage:$pct}'
