@@ -13,6 +13,7 @@ CLI_COLOR_NORMAL=""
 CLI_COLOR_WARNING=""
 CLI_COLOR_CRITICAL=""
 FRAME=false
+FRAME_FONT="JetBrainsMono Nerd Font Mono"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --color-normal)   [[ $# -ge 2 ]] || { echo '{"text":"⚠","tooltip":"--color-normal requires a value","class":"critical"}'; exit 0; }
@@ -22,6 +23,8 @@ while [[ $# -gt 0 ]]; do
         --color-critical) [[ $# -ge 2 ]] || { echo '{"text":"⚠","tooltip":"--color-critical requires a value","class":"critical"}'; exit 0; }
                           CLI_COLOR_CRITICAL="$2"; shift 2 ;;
         --frame) FRAME=true; shift ;;
+        --frame-font) [[ $# -ge 2 ]] || { echo '{"text":"⚠","tooltip":"--frame-font requires a value","class":"critical"}'; exit 0; }
+                      FRAME_FONT="$2"; shift 2 ;;
         *) _o="${1//\\/\\\\}"; _o="${_o//\"/\\\"}"; echo '{"text":"⚠","tooltip":"Unknown option: '"$_o"'","class":"critical"}'; exit 0 ;;
     esac
 done
@@ -139,7 +142,8 @@ if [[ "$FRAME" == "true" ]]; then
     TIP+="${B}│${E}$(_pad "$row_bar")${B}│${E}${NL}"
     TIP+="${B}│${E}$(_pad "$row_status")${B}│${E}${NL}"
     TIP+="${B}╰${_border}╯${E}"
-    TIP="<span font_family='JetBrainsMono Nerd Font Mono'>${TIP}</span>"
+    _ff=$(sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/'\''/\&apos;/g' <<< "$FRAME_FONT")
+    TIP="<span font_family='${_ff}'>${TIP}</span>"
 else
     # Plain (default): no border, no font pin → renders in the user's font.
     # Leading space aligns the title with the rule below it.
