@@ -151,6 +151,10 @@ The three original modules still work, and they now share the colors of the comb
 
 The plugin in [`omarchy/`](omarchy/) is a native widget for the bar of the [Omarchy](https://github.com/basecamp/omarchy) shell. The face of the bar shows the same short summary as Waybar. A click opens a panel with one row for each device. The row shows the name, an animated battery meter, the charge, the charging state, and the time of the last update.
 
+<p align="center">
+  <img src="screenshots/omarchy-desktop.png" alt="logibar in the Omarchy bar, with its panel open" width="960">
+</p>
+
 ![The logibar face in the Omarchy bar](screenshots/omarchy-bar.png)
 
 ![The Omarchy panel](screenshots/omarchy-panel.png)
