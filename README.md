@@ -3,19 +3,19 @@
 [![AUR version](https://img.shields.io/aur/version/logibar)](https://aur.archlinux.org/packages/logibar)
 [![License: MIT](https://img.shields.io/github/license/mryll/logibar)](LICENSE)
 
-Waybar widgets that show battery level for Logitech wireless peripherals — keyboard, mouse, and headset — with event-driven updates and systemd integration.
+logibar shows the battery level of your Logitech Lightspeed devices — keyboard, mouse and headset — in your status bar. It runs on Waybar and on the Omarchy shell (Quickshell). It reads each battery over HID++, and it does not need a daemon from the vendor. It refreshes when a device wakes, goes to sleep, or when a charge cycle begins.
 
-![screenshot](screenshot.png)
+![The Omarchy panel: three devices with battery meters](screenshots/omarchy-panel.png)
 
 ## Features
 
-- Real-time battery monitoring for Logitech Lightspeed devices
-- Event-driven — updates instantly on connect/disconnect/charge events, no polling
-- Two background daemons: one for keyboard/mouse (HID++ 2.0), one for headset (custom HID protocol)
-- Waybar widgets hide automatically when a device is disconnected
-- Color-coded battery levels (normal/warning/critical) with Omarchy theme support
-- Atomic state file writes — no corruption on concurrent reads
-- systemd user services for automatic startup
+- **One widget for all devices.** The bar shows the battery of the device that needs attention first. One click or one hover shows the details of each device.
+- **Event-driven.** Two small daemons listen for HID++ events. There is no polling loop. The bar refreshes when the hardware sends an event.
+- **A real gauge.** The meters go from red at empty, through amber, to green at full. The colors come from your theme.
+- **Two frontends, one brain.** `logibar-status` makes every decision. Waybar and the Omarchy plugin only draw the result.
+- **Theme-aware.** The colors come from the active Omarchy theme, or from a pywal cache, or from a built-in palette.
+- **Monochrome mode.** A flag or the `NO_COLOR` variable removes the colors. Then your own CSS gives the bar its style.
+- **Structured JSON.** A documented output without colors for your own scripts.
 
 ## Supported devices
 
@@ -25,18 +25,23 @@ Waybar widgets that show battery level for Logitech wireless peripherals — key
 | PRO X Superlight 2 | Mouse | `logibar-hidpp-monitor` |
 | PRO X 2 LIGHTSPEED | Headset | `logibar-headset-monitor` |
 
-Adding other Logitech Lightspeed devices is straightforward — see [Adding devices](#adding-devices).
+Other Logitech Lightspeed devices need only a new entry in a table. The section [Add a device](#add-a-device) gives the procedure.
 
 ## Requirements
 
 - Python 3
-- [`python-hid`](https://pypi.org/project/hid/) (hidapi bindings) — `pip install hid` or `pacman -S python-hid`
-- [Waybar](https://github.com/Alexays/Waybar)
-- A [Nerd Font](https://www.nerdfonts.com/) for icons (recommended; required only for the framed tooltip — see [Framed tooltip](#framed-tooltip))
+- **[`python-hidapi`](https://pypi.org/project/hidapi/)** — `pacman -S python-hidapi`, or `pip install hidapi`
+- [`jq`](https://jqlang.github.io/jq/) — all the widget scripts use it
+- [Waybar](https://github.com/Alexays/Waybar), or the Omarchy shell
+- [`inotify-tools`](https://github.com/inotify-tools/inotify-tools) — only for `logibar-status --watch`
+- A [Nerd Font](https://www.nerdfonts.com/) for the icons
 
-### HID device permissions
+> [!IMPORTANT]
+> Install `python-hidapi`. Do not install `python-hid`. Both packages give you a module with the same name `hid`, but the API is different. If you install the wrong package, the daemons stop at the first device and write nothing. No error message appears, because the daemons continue to run. The widget stays empty.
 
-The daemons need read/write access to `/dev/hidraw*` devices. The AUR package includes this rule automatically. For manual installs, create it yourself:
+### Device permissions
+
+The daemons read and write `/dev/hidraw*`. The AUR package adds the rule for you. For a manual installation, add the rule yourself:
 
 ```bash
 sudo tee /etc/udev/rules.d/70-logitech-hidraw.rules << 'EOF'
@@ -46,9 +51,8 @@ EOF
 sudo udevadm control --reload-rules && sudo udevadm trigger --action=change --subsystem-match=hidraw
 ```
 
-The `70-` prefix matters: the rule must sort before systemd's `73-seat-late.rules`, which applies the `uaccess` ACL. A higher prefix (e.g. `99-`) sets the tag too late and access is never granted.
-
-> **Upgrading:** if you previously installed this rule as `99-logitech-hidraw.rules`, remove the stale file — `sudo rm /etc/udev/rules.d/99-logitech-hidraw.rules`.
+> [!NOTE]
+> The `70-` prefix is necessary. The rule must come before the `73-seat-late.rules` file of systemd, which applies the `uaccess` ACL. A higher number, such as `99-`, applies the tag too late, and you get no access. If you installed the rule as `99-logitech-hidraw.rules` before, delete it: `sudo rm /etc/udev/rules.d/99-logitech-hidraw.rules`.
 
 ## Installation
 
@@ -58,7 +62,7 @@ The `70-` prefix matters: the rule must sort before systemd's `73-seat-late.rule
 yay -S logibar
 ```
 
-The AUR package handles everything automatically: udev rule, systemd services enabled and started. Services start immediately in most desktop environments; otherwise you'll see manual instructions.
+The package adds the udev rule and enables both services.
 
 ### From source
 
@@ -67,38 +71,52 @@ git clone https://github.com/mryll/logibar.git
 cd logibar
 make install PREFIX=~/.local
 make install-systemd
-sudo make install-udev   # udev rule requires root
-```
-
-This installs:
-- 3 widget scripts + 2 daemons to `~/.local/bin/`
-- 2 systemd user services (enabled automatically, start on next login)
-- udev rule for HID device access
-
-### Full install (includes debug tools)
-
-```bash
-make install-all PREFIX=~/.local
 sudo make install-udev
 ```
 
-### System-wide
+These commands install 4 widget scripts and 2 daemons in `~/.local/bin/`, 2 systemd user services, and the udev rule.
 
-```bash
-sudo make install install-udev
-make install-systemd   # systemd services are always per-user
-```
+| Target | Result |
+|---|---|
+| `make install` | Widget scripts and daemons |
+| `make install-systemd` | User services, enabled for the next login |
+| `make install-udev` | The udev rule (needs root) |
+| `make install-tools` | Debug tools for a new device |
+| `make install-all` | Everything above, except the udev rule |
+| `make install-omarchy` | The Omarchy shell plugin |
+| `make test` | The test suite |
 
-### Uninstall
-
-```bash
-make uninstall PREFIX=~/.local
-make uninstall-systemd
-```
+To remove any of them, use the same name with `uninstall`, such as `make uninstall PREFIX=~/.local`.
 
 ## Quick start
 
-Add the modules to your `~/.config/waybar/config.jsonc`:
+### Waybar: one module for every device
+
+The bar shows the battery of the device with the lowest charge. The tooltip lists all the devices.
+
+![The Waybar bar module](screenshots/waybar-bar.png)
+![The Waybar tooltip](screenshots/waybar-tooltip.png)
+
+Add these lines to `~/.config/waybar/config.jsonc`:
+
+```jsonc
+"modules-right": ["custom/logibar", ...],
+
+"custom/logibar": {
+    "exec": "logibar-status --watch",
+    "return-type": "json",
+    "restart-interval": 5,
+    "tooltip": true
+}
+```
+
+`--watch` prints a new line on each change, so the bar does not poll. This flag needs `inotify-tools`. Without that package, use `"exec": "logibar-status"` and select your own `"interval"`. To hide a device, give the names of the devices that you want: `--devices keyboard,mouse`.
+
+### Waybar: one module per device
+
+The three original modules still work, and they now share the colors of the combined module.
+
+![The three per-device modules](screenshot.png)
 
 ```jsonc
 "modules-right": ["custom/logibar-keyboard", "custom/logibar-mouse", "custom/logibar-headset", ...],
@@ -127,178 +145,266 @@ Add the modules to your `~/.config/waybar/config.jsonc`:
 ```
 
 > [!NOTE]
-> Widgets use `"interval": "once"` because daemons signal Waybar via `SIGRTMIN+N` for instant updates — no polling needed.
+> These modules use `"interval": "once"`. The daemons send `SIGRTMIN+N` to Waybar after each change, so a polling interval is not necessary.
+
+## Omarchy shell plugin
+
+The plugin in [`omarchy/`](omarchy/) is a native widget for the bar of the [Omarchy](https://github.com/basecamp/omarchy) shell. The face of the bar shows the same short summary as Waybar. A click opens a panel with one row for each device. The row shows the name, an animated battery meter, the charge, the charging state, and the time of the last update.
+
+![The logibar face in the Omarchy bar](screenshots/omarchy-bar.png)
+
+![The Omarchy panel](screenshots/omarchy-panel.png)
+
+Install the plugin, then add it to your bar:
+
+```bash
+make install-omarchy
+```
+
+```json
+"right": [
+    { "id": "mryll.logibar" },
+    ...
+]
+```
+
+The command links this repository into `~/.config/omarchy/plugins/mryll.logibar`. The plugin needs `logibar-status` and both daemons. Install them first.
+
+| Setting | Type | Default | Result |
+|---|---|---|---|
+| `colorMode` | enum | `full` | Where the colors appear: `full`, `none`, `bar-only`, `panel-only` |
+| `showKeyboard` | boolean | `true` | Includes the keyboard |
+| `showMouse` | boolean | `true` | Includes the mouse |
+| `showHeadset` | boolean | `true` | Includes the headset |
+
+Mouse buttons: **left** opens the panel, **middle** refreshes the panel. The widget disappears when no device is connected.
+
+> [!TIP]
+> After you edit a file in `omarchy/`, run `omarchy restart shell`. A rescan of the plugins does not compile the QML again.
 
 ## Configuration
 
 ### Colors
 
-The battery percentage is colored by level out of the box (One Dark palette):
+The battery charge has three levels:
 
-| Class | Range | Default color |
+| Class | Range | Color |
 |---|---|---|
-| `normal` | >20% | `#98c379` (green) |
-| `warning` | 11–20% | `#e5c07b` (yellow) |
-| `critical` | 1–10% | `#e06c75` (red) |
+| `normal` | above 20% | green |
+| `warning` | 11–20% | yellow |
+| `critical` | 1–10% | red |
 
-To override, pass `--color-*` flags in the `exec` field:
+To use your own colors, add the flags to the `exec` line:
 
 ```jsonc
-"custom/logibar-keyboard": {
-    "exec": "logibar-keyboard --color-normal '#50fa7b' --color-critical '#ff5555'",
+"custom/logibar": {
+    "exec": "logibar-status --watch --color-normal '#50fa7b' --color-critical '#ff5555'",
     ...
 }
 ```
 
-Available flags: `--color-normal`, `--color-warning`, `--color-critical`.
+The flags are `--color-normal`, `--color-warning` and `--color-critical`. Each flag takes a hex color, such as `#50fa7b`, `#5f7` or `#50fa7bff`. Waybar also receives the class name, so you can give the module a style in `~/.config/waybar/style.css` instead.
 
-CSS classes (`normal`, `warning`, `critical`) are also emitted for additional styling via `~/.config/waybar/style.css`.
+### Theming
 
-### Theming (Omarchy)
+The colors come from the first source in this list that has them:
 
-Colors are automatically read from the active [Omarchy](https://github.com/basecamp/omarchy) theme at `~/.config/omarchy/current/theme/colors.toml` on every execution. On non-Omarchy systems, the One Dark palette is used as fallback.
+1. The `--color-*` flags.
+2. The active Omarchy theme, at `$XDG_STATE_HOME/omarchy/current/theme/colors.toml`. Older versions of Omarchy keep the theme at `~/.config/omarchy/current/theme/colors.toml`, and that path also works.
+3. A pywal cache, at `$XDG_CACHE_HOME/wal/colors.json`. This source applies only when there is no Omarchy theme.
+4. The built-in One Dark palette.
 
-The priority chain is: **CLI flags** (`--color-*`) > **Omarchy theme** > **One Dark defaults**.
+The pywal file is a standard in practice. The original [pywal](https://github.com/dylanaraps/pywal) has no maintainer now, but [pywal16](https://github.com/eylles/pywal16) writes the same file, and [wallust](https://codeberg.org/explosion-mental/wallust) has a target that is compatible with pywal. logibar reads `special.foreground`, `special.background`, and the colors `color1` (red), `color2` (green), `color3` (yellow) and `color4` (accent).
+
+The same colors reach both frontends, in every theme:
+
+| Flexoki Light | Rosé Pine | Hackerman |
+|:---:|:---:|:---:|
+| ![Flexoki Light tooltip](screenshots/waybar-theme-flexoki-light.png) | ![Rosé Pine tooltip](screenshots/waybar-theme-rose-pine.png) | ![Hackerman tooltip](screenshots/waybar-theme-hackerman.png) |
+| ![Flexoki Light panel](screenshots/omarchy-theme-flexoki-light.png) | ![Rosé Pine panel](screenshots/omarchy-theme-rose-pine.png) | ![Hackerman panel](screenshots/omarchy-theme-hackerman.png) |
+
+| Ristretto | Nord | Kanagawa |
+|:---:|:---:|:---:|
+| ![Ristretto tooltip](screenshots/waybar-theme-ristretto.png) | ![Nord tooltip](screenshots/waybar-theme-nord.png) | ![Kanagawa tooltip](screenshots/waybar-theme-kanagawa.png) |
+| ![Ristretto panel](screenshots/omarchy-theme-ristretto.png) | ![Nord panel](screenshots/omarchy-theme-nord.png) | ![Kanagawa panel](screenshots/omarchy-theme-kanagawa.png) |
+
+> [!NOTE]
+> **Earlier versions did not detect the theme.** The widgets looked for the theme in the old path. They also looked for a `color1` key that current themes do not write. The failure was silent. The tooltips used the built-in palette. The colors now follow your theme.
+
+### Monochrome mode
+
+For a bar without colors, use `--no-color`:
+
+```bash
+logibar-status --no-color            # the same as --no-color=all
+logibar-status --no-color=bar        # a plain bar, a colored tooltip
+logibar-status --no-color=tooltip    # a colored bar, a plain tooltip
+```
+
+| Command | Bar text | Tooltip |
+|---|---|---|
+| none | colored | colored |
+| `--no-color` or `--no-color=all` | plain | plain |
+| `--no-color=bar` | plain | colored |
+| `--no-color=tooltip` | colored | plain |
+
+The [`NO_COLOR`](https://no-color.org) environment variable does the same as `--no-color=all`, if the value is not empty. A flag on the command line is more exact, so the flag has priority: `NO_COLOR=1 logibar-status --no-color=bar` keeps the colors in the tooltip.
+
+Icons, meters, borders and bold text stay. Only the colors disappear.
+
+| Waybar tooltip | Omarchy panel |
+|---|---|
+| ![A monochrome tooltip](screenshots/waybar-tooltip-mono.png) | ![A monochrome panel](screenshots/omarchy-panel-mono.png) |
+
+The Omarchy plugin has the same four states in its `colorMode` setting.
+
+> [!TIP]
+> Waybar still receives the class name for each level. Remove the colors and write your own rules:
+> ```css
+> #custom-logibar.warning  { color: #d79921; }
+> #custom-logibar.critical { color: #cc241d; font-weight: bold; }
+> ```
 
 ### Framed tooltip
 
-By default the tooltip is **plain** (no border) and renders in your Waybar font, so it looks right with any font. Pass `--frame` to each widget to draw the bordered "card" instead:
+By default, the tooltip has no border, and it uses the font of your bar. To draw the box, add `--frame`:
 
 ```bash
-logibar-headset --frame
+logibar-status --frame
 ```
 
-Framed mode pins `JetBrainsMono Nerd Font Mono` **by default** so the box and gauge stay aligned regardless of your bar font. Don't have it (or prefer another)? Point `--frame-font` at any complete Mono Nerd Font you already have:
+A frame needs a font that gives all characters the same width. This mode uses `JetBrainsMono Nerd Font Mono` for that reason. To use a different font:
 
 ```bash
-logibar-headset --frame --frame-font "FiraCode Nerd Font Mono"
+logibar-status --frame --frame-font "FiraCode Nerd Font Mono"
 ```
 
 ### Spacing
 
-Adjust `padding` (inside the widget) and `margin` (outside the widget) in `~/.config/waybar/style.css`:
+Change `padding` and `margin` in `~/.config/waybar/style.css`:
 
 ```css
-#custom-logibar-keyboard,
-#custom-logibar-mouse,
-#custom-logibar-headset {
+#custom-logibar {
     padding: 0 8px;
     margin: 0 4px;
 }
 ```
 
+## Structured JSON output
+
+`logibar-status --json` prints the data behind the widget. Use this output in your own scripts, or read it to see the same data as the widget. The command always exits with 0, and the output contains no colors and no markup.
+
+```json
+{
+  "schema_version": 1,
+  "devices": [
+    { "id": "keyboard", "name": "G915 X TKL", "battery": 92, "connected": true,
+      "charging": true, "state": "ok", "updated_at": "2026-08-20T02:21:04-03:00" }
+  ],
+  "aggregate": { "worst_battery": 8, "any_charging": true, "connected_count": 3, "state": "critical" },
+  "palette": {
+    "ok": "#9ece6a", "warning": "#e0af68", "critical": "#f7768e",
+    "accent": "#7aa2f7", "foreground": "#a9b1d6", "background": "#1a1b26",
+    "thresholds": { "warning": 20, "critical": 10 },
+    "stops": [
+      { "pct": 0, "color": "#f7768e" }, { "pct": 10, "color": "#f7768e" },
+      { "pct": 20, "color": "#e0af68" }, { "pct": 100, "color": "#9ece6a" }
+    ]
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `devices[].state` | `ok`, `warning`, `critical`, or `disconnected` |
+| `devices[].updated_at` | The time when the daemon last wrote this device, in ISO-8601 |
+| `aggregate` | The device with the lowest charge, and the state of the group |
+| `palette` | The colors of the gauge, after the theme and the flags |
+| `palette.stops` | The gauge, as colors and the percentages where they apply |
+
+An error is also a JSON document, with an `error` field and the same exit code 0. Programs that read this output do not parse text.
+
+> [!NOTE]
+> `palette.stops` is the reason why one change of a threshold moves both frontends. `logibar-status` keeps the numbers, and the Omarchy panel interpolates between the stops that it receives. `--no-color` has no effect on this output.
+
 ## How it works
 
 ### Architecture
 
-The system uses a **daemon + widget** pattern:
-
 ```
-┌──────────────────────┐    state files     ┌───────────────────┐
-│  logibar-hidpp-      │──→ keyboard,mouse ─→│  logibar-keyboard │
-│  monitor (Python)    │   ($XDG_RUNTIME_DIR │  logibar-mouse    │──→ Waybar
-│                      │    /logibar/)       │  (Bash widgets)   │
-└──────────────────────┘                     └───────────────────┘
-┌──────────────────────┐    state file       ┌───────────────────┐
-│  logibar-headset-    │──→ headset ────────→│  logibar-headset  │
-│  monitor (Python)    │                     │  (Bash widget)    │──→ Waybar
-└──────────────────────┘                     └───────────────────┘
+┌──────────────────────┐   state files    ┌──────────────────┐
+│  logibar-hidpp-      │──→ keyboard,mouse│                  │
+│  monitor (Python)    │  ($XDG_RUNTIME_  │ logibar-status   │──→ Waybar
+├──────────────────────┤   DIR/logibar/)  │ logibar-keyboard │
+│  logibar-headset-    │──→ headset ─────→│ logibar-mouse    │──→ Omarchy shell
+│  monitor (Python)    │                  │ logibar-headset  │
+└──────────────────────┘                  └──────────────────┘
 ```
 
-1. **Daemons** run as systemd user services, continuously monitoring HID devices
-2. **State files** in `$XDG_RUNTIME_DIR/logibar/` store battery %, connected status, and charging status (3 lines: `battery\nconnected\ncharging`)
-3. **Widget scripts** read the state file and output JSON for Waybar
-4. Daemons signal Waybar via `SIGRTMIN+N` for instant updates (no polling interval needed)
+1. The **daemons** run as systemd user services and monitor the HID devices.
+2. The daemon writes each change to a **state file** in `$XDG_RUNTIME_DIR/logibar/`, in 3 lines: `battery`, `connected`, `charging`. Each of these operations is atomic, so a reader never gets half of a file.
+3. **`logibar-status`** reads these files. It selects the worst device, applies the thresholds, finds the colors, and prints the result.
+4. For Waybar, the daemons also send `SIGRTMIN+N`. For the Omarchy shell, the plugin monitors the files and runs `logibar-status` again after each change.
 
-### Keyboard & mouse: HID++ 2.0
+### Keyboard and mouse: HID++ 2.0
 
-The `logibar-hidpp-monitor` daemon uses the standard **Logitech HID++ 2.0** protocol to monitor keyboard and mouse battery. This is the same protocol used by [Solaar](https://github.com/pwr-Solaar/Solaar), but implemented directly via hidapi without needing the Solaar daemon.
+`logibar-hidpp-monitor` uses the standard **Logitech HID++ 2.0** protocol. [Solaar](https://github.com/pwr-Solaar/Solaar) uses the same protocol, but logibar sends the commands directly to hidapi, with no extra daemon.
 
-**How HID++ 2.0 battery reading works:**
+Each device has two product IDs: one for the Lightspeed receiver and one for the USB cable. One thread monitors each product ID, and a shared state selects the live connection. The cable has priority.
 
-1. **Device discovery** — The daemon enumerates USB HID devices by Vendor ID (`0x046d`) and Product ID. Each device has two PIDs: one for wireless (via Lightspeed receiver) and one for wired (direct USB). Both are monitored in parallel threads.
+To read a battery, the daemon asks the ROOT feature at index `0x00` for the index of the UNIFIED_BATTERY feature (`0x1004`). Then it asks that feature for the charge:
 
-2. **Feature negotiation** — HID++ 2.0 uses a feature-based architecture. To read battery, the daemon first queries the **ROOT feature** (index `0x00`) to find the index of the **UNIFIED_BATTERY feature** (`0x1004`):
-   ```
-   Request:  [0x10, device_idx, 0x00, 0x0d, 0x10, 0x04, 0x00]
-                    │             │     │     └─── feature ID 0x1004
-                    │             │     └──── function 0 (getFeatureIndex) + SW ID
-                    │             └───── ROOT feature is always at index 0
-                    └──────────── 0x01 for wireless (via receiver), 0xFF for wired (direct USB)
-   Response: [0x10, device_idx, 0x00, 0x0d, feature_index, ...]
-   ```
+```
+Request:  [0x10, device_idx, 0x00, 0x0d, 0x10, 0x04, 0x00]
+                  │             │     │     └─── feature ID 0x1004
+                  │             │     └──── function 0 (getFeatureIndex) + SW ID
+                  │             └───── ROOT feature is always at index 0
+                  └──────────── 0x01 for wireless (via receiver), 0xFF for wired (direct USB)
+Response: [0x10, device_idx, 0x00, 0x0d, feature_index, ...]
 
-3. **Battery query** — Once we have the feature index, we call function `0x01` (getStatus) on the UNIFIED_BATTERY feature:
-   ```
-   Request:  [0x11, device_idx, feature_index, 0x10, 0x00, ..., 0x00]
-   Response: [0x11, device_idx, feature_index, 0x10, SoC, level, status, ...]
-                                                      │     │      └── 1=charging, 2=slow, 3=full
-                                                      │     └── level flags
-                                                      └── State of Charge (0-100%)
-   ```
+Request:  [0x11, device_idx, feature_index, 0x10, 0x00, ..., 0x00]
+Response: [0x11, device_idx, feature_index, 0x10, SoC, level, status, ...]
+                                                   │     │      └── 1=charging, 2=slow, 3=full
+                                                   │     └── level flags
+                                                   └── State of Charge (0-100%)
+```
 
-4. **Event-driven updates** — After initial query, the daemon uses **blocking reads with timeout** (1 second). The receiver sends unsolicited HID++ notifications on:
-   - **Connection events** (`0x41`) — device wakes up, goes to sleep, or disconnects. The `link_off` flag (byte 4, bit 6) indicates disconnect.
-   - **Battery broadcasts** — the device periodically reports battery changes (charging started/stopped, level changed).
+After the first request, the daemon blocks on the device with a timeout of one second. The receiver sends a message after each change of the state:
 
-5. **Wireless + wired handling** — Each device runs two threads: one monitoring the wireless receiver PID and one monitoring the wired PID. A shared state dict with a threading lock coordinates which connection is active. When wired is connected, wireless monitoring pauses.
+- **Connection events** (`0x41`) — the device wakes, goes to sleep, or disconnects. Bit 6 of byte 4 is the `link_off` flag.
+- **Battery events** — the device reports a new charge, or the start or the end of a charge cycle.
 
-**Supported HID++ device indices:**
-- `0x01` — paired device via Lightspeed wireless receiver
-- `0xFF` — direct USB (wired) connection
+### Headset: a vendor protocol
 
-### Headset: custom HID protocol
+The PRO X 2 LIGHTSPEED does not answer the UNIFIED_BATTERY feature. It needs a vendor command. The scripts in [`tools/`](tools/) helped to find that command. The headset also uses the HID usage page `0xffa0`, not `0xff00`.
 
-The PRO X 2 LIGHTSPEED headset does **not** use the standard HID++ UNIFIED_BATTERY feature. Instead, it uses a device-specific HID protocol that required reverse-engineering (the `tools/` scripts were used for this).
+```
+Battery request:  51 08 00 03 1a 00 03 00 04 0a [00 * 54]
+Battery response: 51 0b XX XX XX XX XX XX 04 XX battery_pct XX charging_status ...
+                   │  │                    │     │              └── 0x02 = charging
+                   │  │                    │     └── battery percentage (1-100)
+                   │  │                    └── response type marker (0x04)
+                   │  └── response identifier (0x0b)
+                   └── report ID (0x51)
 
-**How the headset battery reading works:**
+Power event:      51 05 00 03 00 00 XX 00
+                                     └── 0x00 = off, 0x01 = on
+```
 
-1. **Device discovery** — The daemon looks for the headset by VID:PID (`0x046d:0x0af7`) on the HID usage page `0xffa0` (vendor-defined). This is different from keyboard/mouse which use usage page `0xff00`.
+The headset reports each power event, but it does not report a new charge without a request. For this reason, the daemon asks for the charge every 60 seconds while the headset has power. It also asks immediately after a power-on event.
 
-2. **Battery request** — A fixed 64-byte HID report is sent to request battery status:
-   ```
-   Request: 51 08 00 03 1a 00 03 00 04 0a [00 * 54]
-   ```
-   This is a vendor-specific command, not part of the standard HID++ protocol.
+## Add a device
 
-3. **Battery response** — The daemon reads responses and looks for a specific pattern:
-   ```
-   Response: 51 0b XX XX XX XX XX XX 04 XX battery_pct XX charging_status ...
-              │  │                    │     │              └── 0x02 = charging
-              │  │                    │     └── battery percentage (1-100)
-              │  │                    └── response type marker (0x04)
-              │  └── response identifier (0x0b)
-              └── report ID (0x51)
-   ```
+To add another Logitech device to the keyboard and mouse daemon:
 
-4. **On/Off detection** — The headset sends event packets when it turns on or off:
-   ```
-   On/Off: 51 05 00 03 00 00 XX 00
-                               └── 0x00 = off, 0x01 = on
-   ```
-   When the headset turns on, a battery request is immediately sent. When it turns off, the state file is cleared and the widget disappears.
+1. Find the two product IDs of the device, one for the wireless connection and one for the cable:
 
-5. **Polling** — Unlike the keyboard/mouse which rely entirely on events, the headset daemon polls battery every 60 seconds when the headset is active (since the headset doesn't broadcast battery changes spontaneously).
-
-### Widget scripts
-
-All three widget scripts are identical Bash scripts that:
-
-1. Read the 3-line state file from `$XDG_RUNTIME_DIR/logibar/{device}`
-2. If disconnected or no battery data, output `{"text": ""}` (Waybar hides the widget)
-3. Determine CSS class: `critical` (<=10%), `warning` (<=20%), `normal` (>20%)
-4. Output JSON with Nerd Font icon, battery percentage, tooltip, and class
-
-## Adding devices
-
-To add a new Logitech device to the keyboard/mouse daemon:
-
-1. Find its Product IDs (wireless + wired):
    ```bash
    lsusb | grep 046d
    ```
 
-2. Edit `logibar-hidpp-monitor` and add an entry to the `DEVICES` list:
+2. Add a line to the `DEVICES` list in `logibar-hidpp-monitor`:
+
    ```python
    DEVICES = [
        (0xc547, 0xc357, "keyboard", 9),   # G915 X TKL
@@ -307,31 +413,39 @@ To add a new Logitech device to the keyboard/mouse daemon:
    ]
    ```
 
-3. Create a new widget script (copy `logibar-keyboard` and change the icon, tooltip text, and state file name).
+3. Add the device to `DEVICE_IDS`, `DEVICE_ICON` and `DEVICE_NAME` in `logibar-status`.
 
-4. Add the new Waybar module with the matching signal number.
+4. To make a module for one device, copy `logibar-keyboard`, then set new values for `ICON`, `TOOLTIP` and `STATE_FILE`. Give the new Waybar module the same signal number as the daemon.
 
 > [!TIP]
-> The `tools/` directory contains utilities to help identify the correct PIDs and verify HID++ support:
-> - `logibar-hidpp-battery <hidraw_device>` — read battery from any HID++ 2.0 device
-> - `logibar-hidpp-debug <hidraw_device>` — verbose version that tries multiple device indices
-> - `logibar-headset-probe` — probe available HID++ features on a device
+> The [`tools/`](tools/) directory helps you to find the correct IDs:
+> - `logibar-hidpp-battery <hidraw_device>` — reads the battery of any HID++ 2.0 device
+> - `logibar-hidpp-debug <hidraw_device>` — the same, but it prints each step and tries several device indexes
+> - `logibar-headset-probe` — lists the features that a device answers
 
 ## Troubleshooting
 
-| Symptom | Cause | Fix |
+| Symptom | Cause | Solution |
 |---|---|---|
-| Widget never appears | Daemon not running | `systemctl --user status logibar-hidpp-monitor` |
-| Widget shows nothing | Device disconnected | Turn on / wake up the device |
-| Permission denied in journal | No hidraw access | Set up the udev rule (see [Requirements](#hid-device-permissions)) |
-| Battery stuck at old value | State file stale | Restart daemon: `systemctl --user restart logibar-hidpp-monitor` |
-| Headset widget not updating | Wrong hidraw device | Check `ls /dev/hidraw*` and verify the PID matches |
+| The widget never appears | The daemon does not run | `systemctl --user status logibar-hidpp-monitor` |
+| The widget appears, then stays empty | The wrong `hid` package | Install `python-hidapi`, remove `python-hid`, then restart the services |
+| The widget is empty | The device has no power, or it is asleep | Set the power switch to on, or press a key |
+| `Permission denied` in the journal | No access to `hidraw` | Add the [udev rule](#device-permissions) |
+| The charge stays the same | The state file is old | `systemctl --user restart logibar-hidpp-monitor` |
+| The Omarchy widget shows a warning sign | `logibar-status` is not on PATH | `make install PREFIX=~/.local` |
+| A change in `omarchy/` does nothing | The QML is still the old version | `omarchy restart shell` |
 
-Check daemon logs:
+To read the logs of the daemons:
 
 ```bash
 journalctl --user -u logibar-hidpp-monitor -f
 journalctl --user -u logibar-headset-monitor -f
+```
+
+To see the state of every device at once:
+
+```bash
+logibar-status --json | jq
 ```
 
 ## Related

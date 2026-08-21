@@ -2,11 +2,32 @@
 # Logitech G915 X TKL Battery Widget for Waybar
 #
 # Usage: logibar-keyboard [--color-normal HEX] [--color-warning HEX] [--color-critical HEX]
+#        [--no-color[=all|bar|tooltip]]
+#
+# --no-color drops color markup from the bar text, the tooltip, or both
+# (`all` when the value is omitted); NO_COLOR in the environment means =all,
+# and an explicit flag wins over it. The waybar `class` field is unaffected,
+# so CSS styling keeps working.
 
 STATE_FILE="${XDG_RUNTIME_DIR:-/run/user/$UID}/logibar/keyboard"
 ICON="󰌌"
 ICON_CHARGING="󰌌 ⚡"
 TOOLTIP="G915 X TKL"
+
+# Structured argument errors, escaped by jq so a hostile or multi-line value
+# cannot break out of the JSON (jq is a hard dependency of the output path).
+cli_error() {  # cli_error MESSAGE
+    if command -v jq >/dev/null 2>&1; then
+        jq -nc --arg m "$1" '{text:"\u26a0", tooltip:$m, class:"critical"}'
+    else
+        echo '{"text":"\u26a0","tooltip":"invalid arguments","class":"critical"}'
+    fi
+    exit 0
+}
+
+# Same hex forms logibar-status accepts. Overrides are interpolated into
+# single-quoted Pango attributes, so anything else is refused at the door.
+_is_hex() { [[ "$1" =~ ^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$ ]]; }
 
 # --- Parse args ---
 CLI_COLOR_NORMAL=""
@@ -14,20 +35,44 @@ CLI_COLOR_WARNING=""
 CLI_COLOR_CRITICAL=""
 FRAME=false
 FRAME_FONT="JetBrainsMono Nerd Font Mono"
+PLAIN_SURFACES=""   # "" | all | bar | tooltip
+_nc=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --color-normal)   [[ $# -ge 2 ]] || { echo '{"text":"⚠","tooltip":"--color-normal requires a value","class":"critical"}'; exit 0; }
+        --color-normal)   [[ $# -ge 2 ]] || cli_error "--color-normal requires a value"
+                          _is_hex "$2" || cli_error "--color-normal expects a hex color like #98c379, got: $2"
                           CLI_COLOR_NORMAL="$2"; shift 2 ;;
-        --color-warning)  [[ $# -ge 2 ]] || { echo '{"text":"⚠","tooltip":"--color-warning requires a value","class":"critical"}'; exit 0; }
+        --color-warning)  [[ $# -ge 2 ]] || cli_error "--color-warning requires a value"
+                          _is_hex "$2" || cli_error "--color-warning expects a hex color like #e5c07b, got: $2"
                           CLI_COLOR_WARNING="$2"; shift 2 ;;
-        --color-critical) [[ $# -ge 2 ]] || { echo '{"text":"⚠","tooltip":"--color-critical requires a value","class":"critical"}'; exit 0; }
+        --color-critical) [[ $# -ge 2 ]] || cli_error "--color-critical requires a value"
+                          _is_hex "$2" || cli_error "--color-critical expects a hex color like #e06c75, got: $2"
                           CLI_COLOR_CRITICAL="$2"; shift 2 ;;
+        --no-color) PLAIN_SURFACES="all"; shift ;;
+        --no-color=*)
+            _nc="${1#*=}"
+            case "$_nc" in
+                all|bar|tooltip) PLAIN_SURFACES="$_nc" ;;
+                *) cli_error "unknown --no-color value: $_nc (expected all, bar or tooltip)" ;;
+            esac
+            shift ;;
         --frame) FRAME=true; shift ;;
-        --frame-font) [[ $# -ge 2 ]] || { echo '{"text":"⚠","tooltip":"--frame-font requires a value","class":"critical"}'; exit 0; }
+        --frame-font) [[ $# -ge 2 ]] || cli_error "--frame-font requires a value"
                       FRAME_FONT="$2"; shift 2 ;;
-        *) _o="${1//\\/\\\\}"; _o="${_o//\"/\\\"}"; echo '{"text":"⚠","tooltip":"Unknown option: '"$_o"'","class":"critical"}'; exit 0 ;;
+        *) cli_error "Unknown option: $1" ;;
     esac
 done
+
+# https://no-color.org - any non-empty NO_COLOR means monochrome everywhere,
+# but an explicit --no-color=... is the more specific instruction and wins.
+[[ -z "$PLAIN_SURFACES" && -n "${NO_COLOR:-}" ]] && PLAIN_SURFACES="all"
+BAR_PLAIN=false
+TIP_PLAIN=false
+case "$PLAIN_SURFACES" in
+    all)     BAR_PLAIN=true; TIP_PLAIN=true ;;
+    bar)     BAR_PLAIN=true ;;
+    tooltip) TIP_PLAIN=true ;;
+esac
 
 # --- Colors: CLI overrides > Omarchy theme > One Dark defaults ---
 COLOR_NORMAL="#98c379"
@@ -45,27 +90,42 @@ hex_blend() {  # average two #RRGGBB colors
         $(( (16#${c1:4:2} + 16#${c2:4:2}) / 2 ))
 }
 
-_theme="$HOME/.config/omarchy/current/theme/colors.toml"
-if [[ -f "$_theme" ]]; then
-    while IFS= read -r line; do
-        [[ "$line" =~ ^[[:space:]]*# ]] && continue
-        [[ -z "${line// /}" ]] && continue
-        if [[ "$line" =~ ^[[:space:]]*([a-zA-Z_][a-zA-Z0-9_]*)[[:space:]]*=[[:space:]]*\"([^\"]*)\" ]]; then
-            case "${BASH_REMATCH[1]}" in
-                color1)     COLOR_CRITICAL="${BASH_REMATCH[2]}" ;;
-                color2)     COLOR_NORMAL="${BASH_REMATCH[2]}" ;;
-                color3)     COLOR_WARNING="${BASH_REMATCH[2]}" ;;
-                accent)     ACCENT="${BASH_REMATCH[2]}" ;;
-                foreground) FG="${BASH_REMATCH[2]}" ;;
-                background) BG="${BASH_REMATCH[2]}" ;;
-            esac
-        fi
-    done < "$_theme"
+# Color resolution — flags > Omarchy theme (XDG state dir, then legacy config)
+# > pywal cache > One Dark — lives in logibar-status, so these compatibility
+# widgets cannot drift from the combined module. logibar-status ships in the
+# same install target, so it sits next to this script; fall back to PATH, and
+# to the One Dark defaults above if it is missing entirely.
+_resolved=false
+_status="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/logibar-status"
+[[ -x "$_status" ]] || _status="$(command -v logibar-status 2>/dev/null)"
+if [[ -n "$_status" && -x "$_status" ]] && command -v jq >/dev/null 2>&1; then
+    # One value per line, never tab-separated: tab is IFS whitespace, so `read`
+    # would collapse empty fields and shift every later color one slot left.
+    _pal=()
+    mapfile -t _pal < <("$_status" --json \
+        ${CLI_COLOR_CRITICAL:+--color-critical "$CLI_COLOR_CRITICAL"} \
+        ${CLI_COLOR_WARNING:+--color-warning "$CLI_COLOR_WARNING"} \
+        ${CLI_COLOR_NORMAL:+--color-normal "$CLI_COLOR_NORMAL"} 2>/dev/null \
+        | jq -r '.palette | (.critical // ""), (.warning // ""), (.ok // ""),
+                            (.accent // ""), (.foreground // ""), (.background // "")' 2>/dev/null)
+    if [[ ${#_pal[@]} -eq 6 && -n "${_pal[0]}" ]]; then
+        COLOR_CRITICAL="${_pal[0]}"
+        COLOR_WARNING="${_pal[1]}"
+        COLOR_NORMAL="${_pal[2]}"
+        [[ -n "${_pal[3]}" ]] && ACCENT="${_pal[3]}"
+        [[ -n "${_pal[4]}" ]] && FG="${_pal[4]}"
+        [[ -n "${_pal[5]}" ]] && BG="${_pal[5]}"
+        _resolved=true   # overrides were applied by logibar-status, normalized
+    fi
 fi
 
-[[ -n "$CLI_COLOR_NORMAL" ]]   && COLOR_NORMAL="$CLI_COLOR_NORMAL"
-[[ -n "$CLI_COLOR_WARNING" ]]  && COLOR_WARNING="$CLI_COLOR_WARNING"
-[[ -n "$CLI_COLOR_CRITICAL" ]] && COLOR_CRITICAL="$CLI_COLOR_CRITICAL"
+if ! $_resolved; then
+    # No logibar-status: One Dark, plus any override that Pango can render
+    # literally (it understands #rgb and #rrggbb, but not an alpha suffix).
+    [[ "$CLI_COLOR_NORMAL"   =~ ^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$ ]] && COLOR_NORMAL="$CLI_COLOR_NORMAL"
+    [[ "$CLI_COLOR_WARNING"  =~ ^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$ ]] && COLOR_WARNING="$CLI_COLOR_WARNING"
+    [[ "$CLI_COLOR_CRITICAL" =~ ^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$ ]] && COLOR_CRITICAL="$CLI_COLOR_CRITICAL"
+fi
 
 DIM=$(hex_blend "$FG" "$BG")
 BAR_EMPTY=$(hex_blend "$BG" "$DIM")
@@ -96,7 +156,7 @@ fi
 
 # --- Bar text (the waybar module label) ---
 if [[ "$CHARGING" == "1" ]]; then DISPLAY_ICON="$ICON_CHARGING"; else DISPLAY_ICON="$ICON"; fi
-if [[ -n "$COLOR" ]]; then
+if [[ -n "$COLOR" ]] && ! $BAR_PLAIN; then
     BATTERY_TEXT="<span size='small' foreground='${COLOR}'>$BATTERY%</span>"
 else
     BATTERY_TEXT="<span size='small'>$BATTERY%</span>"
@@ -104,22 +164,35 @@ fi
 
 # --- Tooltip: framed battery card (family style) ---
 strip_tags() { sed 's/<[^>]*>//g' <<< "$1"; }
+
+# Tooltip markup helpers: on a plain surface they emit no color markup, while
+# keeping weight, glyphs, gauge characters and layout. Widths still line up
+# because _pad()/_cpad() measure stripped text.
+tip_c() {   # tip_c COLOR TEXT
+    if $TIP_PLAIN; then printf '%s' "$2"
+    else printf "<span foreground='%s'>%s</span>" "$1" "$2"; fi
+}
+
+tip_bc() {  # tip_bc COLOR TEXT - bold, colored unless the tooltip is plain
+    if $TIP_PLAIN; then printf "<span font_weight='bold'>%s</span>" "$2"
+    else printf "<span font_weight='bold' foreground='%s'>%s</span>" "$1" "$2"; fi
+}
 BAR_LEN=14
 filled=$(( BATTERY * BAR_LEN / 100 ))
 (( filled > BAR_LEN )) && filled=$BAR_LEN
 (( filled < 0 )) && filled=0
 printf -v _bf '%*s' "$filled" ''
 printf -v _be '%*s' "$(( BAR_LEN - filled ))" ''
-gauge="<span foreground='${BAR_COLOR}'>${_bf// /█}</span><span foreground='${BAR_EMPTY}'>${_be// /░}</span>"
+gauge="$(tip_c "$BAR_COLOR" "${_bf// /█}")$(tip_c "$BAR_EMPTY" "${_be// /░}")"
 
 if [[ "$CHARGING" == "1" ]]; then
-    status="<span foreground='${COLOR_NORMAL}'>$(printf '\U000F0084')  Charging</span>"
+    status=$(tip_c "$COLOR_NORMAL" "$(printf '\U000F0084')  Charging")
 else
-    status="<span foreground='${DIM}'>$(printf '\U000F007E')  On battery</span>"
+    status=$(tip_c "$DIM" "$(printf '\U000F007E')  On battery")
 fi
 
-title="<span font_weight='bold' foreground='${ACCENT}'>${ICON}  ${TOOLTIP}</span>"
-row_bar="   ${gauge}  <span font_weight='bold' foreground='${BAR_COLOR}'>${BATTERY}%</span>"
+title=$(tip_bc "$ACCENT" "${ICON}  ${TOOLTIP}")
+row_bar="   ${gauge}  $(tip_bc "$BAR_COLOR" "${BATTERY}%")"
 row_status="   ${status}"
 
 INNER=0
@@ -131,6 +204,7 @@ _pad()  { local _p; _p=$(strip_tags "$1"); local n=$(( INNER - ${#_p} )); (( n <
 _cpad() { local _p; _p=$(strip_tags "$1"); local n=$(( INNER - ${#_p} )); (( n < 0 )) && n=0; local l=$(( n/2 )) r=$(( n - n/2 )) ls rs; printf -v ls '%*s' "$l" ''; printf -v rs '%*s' "$r" ''; printf '%s%s%s' "$ls" "$1" "$rs"; }
 
 B="<span foreground='${ACCENT}'>"; E="</span>"; NL=$'\n'
+if $TIP_PLAIN; then B=""; E=""; fi
 printf -v _border '%*s' "$INNER" ''; _border="${_border// /─}"
 printf -v _sepd '%*s' "$(( INNER - 2 ))" ''; _sepd="${_sepd// /─}"
 if [[ "$FRAME" == "true" ]]; then
@@ -138,7 +212,7 @@ if [[ "$FRAME" == "true" ]]; then
     # uniform advance — alignment holds regardless of the user's bar font.
     TIP="${B}╭${_border}╮${E}${NL}"
     TIP+="${B}│${E}$(_cpad "$title")${B}│${E}${NL}"
-    TIP+="${B}│${E}$(_pad " <span foreground='${DIM}'>${_sepd}</span>")${B}│${E}${NL}"
+    TIP+="${B}│${E}$(_pad " $(tip_c "$DIM" "$_sepd")")${B}│${E}${NL}"
     TIP+="${B}│${E}$(_pad "$row_bar")${B}│${E}${NL}"
     TIP+="${B}│${E}$(_pad "$row_status")${B}│${E}${NL}"
     TIP+="${B}╰${_border}╯${E}"
@@ -148,7 +222,7 @@ else
     # Plain (default): no border, no font pin → renders in the user's font.
     # Leading space aligns the title with the rule below it.
     TIP=" ${title}${NL}"
-    TIP+=" <span foreground='${DIM}'>${_sepd}</span>${NL}"
+    TIP+=" $(tip_c "$DIM" "$_sepd")${NL}"
     TIP+="${row_bar}${NL}"
     TIP+="${row_status}"
 fi

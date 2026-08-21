@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# PATH shim: makes `logibar-status` resolve to the demo fixture when this
+# directory comes first on PATH, so the Waybar module and the Omarchy plugin
+# both pick it up without knowing anything about the fixture.
+#
+#   PATH="$PWD/screenshots/demo:$PATH" logibar-status --json
+#
+# A real file rather than a symlink on purpose: the repo root carries the
+# plugin manifest, and omarchy-plugin-validate rejects symlinks anywhere
+# inside a plugin folder.
+exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/demo-data" "$@"

@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Demo fixture for README screenshots: impersonates `logibar-status`.
+#
+# Put this directory on PATH ahead of the real binary and every frontend — the
+# combined Waybar module and the Omarchy shell plugin alike — renders the same
+# fixed set of devices:
+#
+#   PATH="$PWD/screenshots/demo:$PATH" logibar-status
+#
+# Rather than hand-writing two documents, the fixture writes demo state files
+# into a throwaway directory and runs the REAL logibar-status against them with
+# XDG_RUNTIME_DIR pointed there. Aggregation, severity thresholds, the resolved
+# theme palette, --devices, --json, --no-color and NO_COLOR are therefore the
+# genuine code paths, and the fixture can never drift from the schema.
+#
+# The devices are chosen to put the whole gauge in one shot: a healthy charging
+# keyboard (green, charging glyph), a mid-range mouse, and a headset in the
+# critical band — the urgent treatment that no real device here is showing.
+# Timestamps are computed at run time, so "Updated HH:MM" always looks fresh.
+
+set -uo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REAL="$SCRIPT_DIR/../../logibar-status"
+
+if [[ ! -x "$REAL" ]]; then
+    # Same failure dialect the real CLI uses, so a broken fixture still renders.
+    for _a in "$@"; do
+        [[ "$_a" == "--json" ]] && {
+            echo '{"schema_version":1,"error":{"message":"demo fixture: logibar-status not found next to it"}}'
+            exit 0
+        }
+    done
+    echo '{"text":"⚠","tooltip":"demo fixture: logibar-status not found next to it","class":"critical"}'
+    exit 0
+fi
+
+DEMO_DIR=$(mktemp -d) || exit 0
+trap 'rm -rf "$DEMO_DIR"' EXIT INT TERM
+mkdir -p "$DEMO_DIR/logibar"
+
+# demo_device NAME BATTERY CONNECTED CHARGING MINUTES_AGO
+demo_device() {
+    printf '%s\n%s\n%s' "$2" "$3" "$4" > "$DEMO_DIR/logibar/$1"
+    # updated_at comes from the file mtime, so stagger the writes: a footer
+    # where every device updated in the same second looks synthetic.
+    touch -d "$5 minutes ago" "$DEMO_DIR/logibar/$1"
+}
+
+demo_device keyboard 92 1 1 2    # green band, charging
+demo_device mouse    38 1 0 7    # mid ramp, on battery
+demo_device headset   8 1 0 14   # critical band, urgent treatment
+
+XDG_RUNTIME_DIR="$DEMO_DIR" "$REAL" "$@"
+exit $?

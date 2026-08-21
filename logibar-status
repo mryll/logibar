@@ -1,0 +1,497 @@
+#!/bin/bash
+# Combined Logitech battery status for logibar
+#
+# One module for all devices: aggregate face (worst battery) + per-device tooltip.
+# Severity thresholds and aggregation live HERE, once — every frontend (waybar,
+# Omarchy shell) consumes this script instead of re-deciding.
+#
+# Usage: logibar-status [--json] [--watch] [--devices LIST]
+#                       [--color-normal HEX] [--color-warning HEX] [--color-critical HEX]
+#                       [--frame] [--frame-font NAME]
+#
+#   default     waybar JSON for a single combined module
+#   --json      structured document (schema_version 1): devices[] + aggregate
+#   --watch     stream waybar JSON, one line per state change (needs inotifywait)
+#   --devices   comma-separated subset of: keyboard,mouse,headset (default: all)
+#   --no-color  drop color markup from the bar text, the tooltip, or both
+#               (=all|bar|tooltip; `all` when the value is omitted). NO_COLOR
+#               in the environment means =all; an explicit flag wins over it.
+#               Never affects --json or the waybar `class` field.
+
+STATE_DIR="${XDG_RUNTIME_DIR:-/run/user/$UID}/logibar"
+
+# Device registry — ids, Nerd Font identity glyphs, display names.
+DEVICE_IDS=(keyboard mouse headset)
+declare -A DEVICE_ICON=([keyboard]="󰌌" [mouse]="󰍽" [headset]="󰋎")
+declare -A DEVICE_NAME=([keyboard]="G915 X TKL" [mouse]="PRO X Superlight 2" [headset]="PRO X 2 Headset")
+
+# Severity thresholds — single source of truth (mirrored nowhere else).
+WARNING_LEVEL=20
+CRITICAL_LEVEL=10
+
+# Stepped battery glyphs per decile, same mapping as Omarchy's power widget.
+LEVEL_GLYPHS=(󰁺 󰁻 󰁼 󰁽 󰁾 󰁿 󰂀 󰂁 󰂂 󰁹)
+CHARGING_GLYPHS=(󰢜 󰂆 󰂇 󰂈 󰢝 󰂉 󰢞 󰂊 󰂋 󰂅)
+
+battery_glyph() {  # battery_glyph PCT CHARGING(0|1)
+    local i=$(( $1 / 10 ))
+    (( i > 9 )) && i=9
+    (( i < 0 )) && i=0
+    if [[ "$2" == "1" ]]; then printf '%s' "${CHARGING_GLYPHS[$i]}"; else printf '%s' "${LEVEL_GLYPHS[$i]}"; fi
+}
+
+# --- Output mode: pre-scan before parsing so argument errors already speak
+# --- the right dialect (fixed literals, no interpolation — jq may be absent).
+JSON_MODE=false
+for _a in "$@"; do [[ "$_a" == "--json" ]] && JSON_MODE=true && break; done
+
+cli_error() {  # cli_error MESSAGE  (exit 0 with a structured error, family style)
+    if $JSON_MODE; then
+        if command -v jq >/dev/null 2>&1; then
+            jq -nc --arg m "$1" '{schema_version:1, error:{message:$m}}'
+        else
+            echo '{"schema_version":1,"error":{"message":"invalid arguments"}}'
+        fi
+    else
+        if command -v jq >/dev/null 2>&1; then
+            jq -nc --arg m "$1" '{text:"⚠", tooltip:$m, class:"critical"}'
+        else
+            echo '{"text":"⚠","tooltip":"invalid arguments","class":"critical"}'
+        fi
+    fi
+    exit 0
+}
+
+# Normalize #rgb / #rgba / #rrggbb / #rrggbbaa to #rrggbb (alpha dropped — the
+# widgets paint opaque). Anything else fails, which is the hex guard: callers
+# only assign when this succeeds, so a malformed value leaves the default.
+norm_hex() {
+    local v="$1"
+    [[ "$v" =~ ^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$ ]] || return 1
+    v="${v#\#}"
+    case ${#v} in
+        3|4) printf '#%s%s%s%s%s%s' "${v:0:1}" "${v:0:1}" "${v:1:1}" "${v:1:1}" "${v:2:1}" "${v:2:1}" ;;
+        *)   printf '#%s' "${v:0:6}" ;;
+    esac
+}
+
+# Assign only when VALUE is a color, and report whether it took, so callers
+# can fall through to a lower-priority source instead of being silenced by an
+# invalid higher-priority one.
+set_if_hex() {  # set_if_hex VARNAME VALUE
+    local -n _target="$1"
+    local _v
+    _v=$(norm_hex "$2") || return 1
+    _target="$_v"
+}
+
+# --- Parse args ---
+CLI_COLOR_NORMAL=""
+CLI_COLOR_WARNING=""
+CLI_COLOR_CRITICAL=""
+FRAME=false
+FRAME_FONT="JetBrainsMono Nerd Font Mono"
+WATCH=false
+PLAIN_SURFACES=""   # "" | all | bar | tooltip — which surfaces drop color
+_nc=""
+DEVICES=("${DEVICE_IDS[@]}")
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --json) shift ;;   # consumed by the pre-scan
+        --watch) WATCH=true; shift ;;
+        --devices)
+            [[ $# -ge 2 ]] || cli_error "--devices requires a value"
+            IFS=',' read -r -a DEVICES <<< "$2"
+            for _d in "${DEVICES[@]}"; do
+                [[ -n "${DEVICE_ICON[$_d]}" ]] || cli_error "unknown device: $_d"
+            done
+            [[ ${#DEVICES[@]} -gt 0 ]] || cli_error "--devices requires at least one device"
+            shift 2 ;;
+        --no-color) PLAIN_SURFACES="all"; shift ;;
+        --no-color=*)
+            _nc="${1#*=}"
+            case "$_nc" in
+                all|bar|tooltip) PLAIN_SURFACES="$_nc" ;;
+                *) cli_error "unknown --no-color value: $_nc (expected all, bar or tooltip)" ;;
+            esac
+            shift ;;
+        # Overrides are validated here, at the door: these values are
+        # interpolated into single-quoted Pango attributes, so a value
+        # containing a quote would break out of the markup.
+        --color-normal)
+            [[ $# -ge 2 ]] || cli_error "--color-normal requires a value"
+            CLI_COLOR_NORMAL=$(norm_hex "$2") || cli_error "--color-normal expects a hex color like #98c379, got: $2"
+            shift 2 ;;
+        --color-warning)
+            [[ $# -ge 2 ]] || cli_error "--color-warning requires a value"
+            CLI_COLOR_WARNING=$(norm_hex "$2") || cli_error "--color-warning expects a hex color like #e5c07b, got: $2"
+            shift 2 ;;
+        --color-critical)
+            [[ $# -ge 2 ]] || cli_error "--color-critical requires a value"
+            CLI_COLOR_CRITICAL=$(norm_hex "$2") || cli_error "--color-critical expects a hex color like #e06c75, got: $2"
+            shift 2 ;;
+        --frame) FRAME=true; shift ;;
+        --frame-font) [[ $# -ge 2 ]] || cli_error "--frame-font requires a value"; FRAME_FONT="$2"; shift 2 ;;
+        *) cli_error "Unknown option: $1" ;;
+    esac
+done
+
+# https://no-color.org — any non-empty NO_COLOR means monochrome everywhere,
+# but an explicit --no-color=... is the more specific instruction and wins
+# (including --no-color=bar, which still colors the tooltip).
+[[ -z "$PLAIN_SURFACES" && -n "${NO_COLOR:-}" ]] && PLAIN_SURFACES="all"
+BAR_PLAIN=false
+TIP_PLAIN=false
+case "$PLAIN_SURFACES" in
+    all)     BAR_PLAIN=true; TIP_PLAIN=true ;;
+    bar)     BAR_PLAIN=true ;;
+    tooltip) TIP_PLAIN=true ;;
+esac
+
+command -v jq >/dev/null 2>&1 || cli_error "jq is required"
+$JSON_MODE && $WATCH && cli_error "--watch only makes sense in waybar mode"
+
+# --- Read state files into parallel arrays ---
+# Sets: BATTERY[id] CONNECTED[id] CHARGING[id] STATE[id] UPDATED[id]
+declare -A BATTERY CONNECTED CHARGING STATE UPDATED
+read_devices() {
+    local id file battery connected charging
+    for id in "${DEVICES[@]}"; do
+        file="$STATE_DIR/$id"
+        BATTERY[$id]=""; CONNECTED[$id]=0; CHARGING[$id]=0; STATE[$id]="disconnected"; UPDATED[$id]=""
+        [[ -f "$file" ]] || continue
+        battery=$(sed -n '1p' "$file")
+        connected=$(sed -n '2p' "$file")
+        charging=$(sed -n '3p' "$file")
+        UPDATED[$id]=$(date -Iseconds -d "@$(stat -c %Y "$file" 2>/dev/null || echo 0)" 2>/dev/null)
+        [[ "$battery" =~ ^[0-9]+$ ]] || continue
+        if [[ "$connected" != "1" ]] || [[ "$battery" -eq 0 ]]; then
+            continue
+        fi
+        (( battery > 100 )) && battery=100
+        BATTERY[$id]="$battery"
+        CONNECTED[$id]=1
+        [[ "$charging" == "1" ]] && CHARGING[$id]=1
+        if   (( battery <= CRITICAL_LEVEL )); then STATE[$id]="critical"
+        elif (( battery <= WARNING_LEVEL ));  then STATE[$id]="warning"
+        else STATE[$id]="ok"; fi
+    done
+}
+
+# Sets: WORST ANY_CHARGING CONNECTED_COUNT AGG_STATE
+aggregate() {
+    WORST=""; ANY_CHARGING=0; CONNECTED_COUNT=0; AGG_STATE="ok"
+    local id
+    for id in "${DEVICES[@]}"; do
+        [[ "${CONNECTED[$id]}" == "1" ]] || continue
+        CONNECTED_COUNT=$(( CONNECTED_COUNT + 1 ))
+        [[ "${CHARGING[$id]}" == "1" ]] && ANY_CHARGING=1
+        if [[ -z "$WORST" ]] || (( BATTERY[$id] < WORST )); then
+            WORST="${BATTERY[$id]}"
+        fi
+    done
+    if [[ -n "$WORST" ]]; then
+        if   (( WORST <= CRITICAL_LEVEL )); then AGG_STATE="critical"
+        elif (( WORST <= WARNING_LEVEL ));  then AGG_STATE="warning"; fi
+    fi
+}
+
+# --- Structured JSON mode ---
+emit_json() {
+    local rows="[]" id
+    for id in "${DEVICES[@]}"; do
+        rows=$(jq -c \
+            --arg id "$id" --arg name "${DEVICE_NAME[$id]}" --arg state "${STATE[$id]}" \
+            --arg battery "${BATTERY[$id]}" --arg updated "${UPDATED[$id]}" \
+            --argjson connected "$([[ "${CONNECTED[$id]}" == "1" ]] && echo true || echo false)" \
+            --argjson charging "$([[ "${CHARGING[$id]}" == "1" ]] && echo true || echo false)" \
+            '. + [{id:$id, name:$name, battery:(if $battery == "" then null else ($battery|tonumber) end),
+                   connected:$connected, charging:$charging, state:$state,
+                   updated_at:(if $updated == "" then null else $updated end)}]' <<< "$rows")
+    done
+    # The palette travels with the data so every frontend paints the same
+    # gauge: theme colors resolved here once, CLI --color-* overrides applied.
+    #
+    # accent/foreground/background are for the Pango frontends (the per-device
+    # widgets read them from here). The Omarchy panel ignores them: the shell
+    # owns those roles and its own tokens are transparency-aware. What the
+    # panel does need is `warning` and `ok` — the shell's Color singleton has
+    # no yellow and no green — plus the stop positions below.
+    #
+    # `stops` is the whole ramp — the colors AND the percentages they sit at,
+    # derived from the thresholds above. A frontend interpolates between them
+    # and never needs its own copy of a threshold, so moving CRITICAL_LEVEL or
+    # WARNING_LEVEL moves every frontend at once. Stops are ordered by `pct`.
+    jq -nc \
+        --argjson devices "$rows" \
+        --arg worst "$WORST" --arg state "$AGG_STATE" \
+        --argjson charging "$([[ "$ANY_CHARGING" == "1" ]] && echo true || echo false)" \
+        --argjson count "$CONNECTED_COUNT" \
+        --arg ok "$COLOR_NORMAL" --arg warning "$COLOR_WARNING" --arg critical "$COLOR_CRITICAL" \
+        --arg accent "$ACCENT" --arg fg "$FG" --arg bg "$BG" \
+        --argjson warnlevel "$WARNING_LEVEL" --argjson critlevel "$CRITICAL_LEVEL" \
+        '{schema_version:1, devices:$devices,
+          aggregate:{worst_battery:(if $worst == "" then null else ($worst|tonumber) end),
+                     any_charging:$charging, connected_count:$count, state:$state},
+          palette:{ok:$ok, warning:$warning, critical:$critical,
+                   accent:$accent, foreground:$fg, background:$bg,
+                   thresholds:{warning:$warnlevel, critical:$critlevel},
+                   stops:[{pct:0,          color:$critical},
+                          {pct:$critlevel, color:$critical},
+                          {pct:$warnlevel, color:$warning},
+                          {pct:100,        color:$ok}]}}'
+}
+
+# --- Waybar mode (single combined module, pango tooltip) ---
+
+# Colors: CLI overrides > Omarchy theme > pywal cache > One Dark defaults.
+COLOR_NORMAL="#98c379"
+COLOR_WARNING="#e5c07b"
+COLOR_CRITICAL="#e06c75"
+ACCENT="#61afef"
+FG="#abb2bf"
+BG="#282c34"
+
+hex_blend() {  # average two #RRGGBB colors
+    local c1="${1#\#}" c2="${2#\#}"
+    printf '#%02x%02x%02x' \
+        $(( (16#${c1:0:2} + 16#${c2:0:2}) / 2 )) \
+        $(( (16#${c1:2:2} + 16#${c2:2:2}) / 2 )) \
+        $(( (16#${c1:4:2} + 16#${c2:4:2}) / 2 ))
+}
+
+# pywal-compatible cache, used ONLY when no Omarchy theme is installed.
+# Original pywal is archived, but its cache path is the de-facto standard: the
+# maintained pywal16 fork writes the same file, and wallust can target it.
+# Missing file, unreadable file, or invalid JSON: leave every default alone.
+load_pywal() {
+    local _cache="${XDG_CACHE_HOME:-$HOME/.cache}/wal/colors.json"
+    [[ -r "$_cache" ]] || return 0
+
+    # One jq pass, one value per line; `// ""` covers missing keys. Line-based
+    # (not tab-separated) on purpose: tab is IFS whitespace, so `read` would
+    # collapse runs of empty fields and shift every later value left.
+    # Malformed JSON makes jq fail and emit nothing, which the count check
+    # below turns into "no colors" — never an error, never a partial palette.
+    local _vals=()
+    mapfile -t _vals < <(jq -r '(.special.foreground // ""), (.special.background // ""),
+                                (.colors.color1 // ""), (.colors.color2 // ""),
+                                (.colors.color3 // ""),
+                                (.colors.color4 // .special.cursor // "")' \
+                             "$_cache" 2>/dev/null)
+    [[ ${#_vals[@]} -eq 6 ]] || return 0
+
+    local _fg="${_vals[0]}" _bg="${_vals[1]}" _red="${_vals[2]}"
+    local _green="${_vals[3]}" _yellow="${_vals[4]}" _accent="${_vals[5]}"
+
+    # pywal has no orange slot; logibar never uses one (its warning anchor is
+    # the yellow), so there is nothing to synthesize here.
+    set_if_hex FG "$_fg"
+    set_if_hex BG "$_bg"
+    set_if_hex COLOR_CRITICAL "$_red"
+    set_if_hex COLOR_NORMAL "$_green"
+    set_if_hex COLOR_WARNING "$_yellow"
+    set_if_hex ACCENT "$_accent"
+}
+
+load_theme() {
+    # Current Omarchy keeps the active theme under the XDG state dir; older
+    # releases used ~/.config. Try both. `${X:-default}` also covers an
+    # explicitly empty XDG_STATE_HOME, which must not become a relative path.
+    local _state="${XDG_STATE_HOME:-$HOME/.local/state}"
+    local _theme="$_state/omarchy/current/theme/colors.toml" line
+    [[ -f "$_theme" ]] || _theme="$HOME/.config/omarchy/current/theme/colors.toml"
+    # Themes name the gauge colors semantically (red/yellow/green); older ones
+    # only had the terminal slots (color1/color2/color3). Collect both and
+    # resolve after the loop so the semantic names always win.
+    local _sem_red="" _sem_yellow="" _sem_green=""
+    local _leg_red="" _leg_yellow="" _leg_green=""
+    if [[ -f "$_theme" ]]; then
+        while IFS= read -r line; do
+            [[ "$line" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "${line// /}" ]] && continue
+            if [[ "$line" =~ ^[[:space:]]*([a-zA-Z_][a-zA-Z0-9_]*)[[:space:]]*=[[:space:]]*\"([^\"]*)\" ]]; then
+                case "${BASH_REMATCH[1]}" in
+                    red)        _sem_red="${BASH_REMATCH[2]}" ;;
+                    yellow)     _sem_yellow="${BASH_REMATCH[2]}" ;;
+                    green)      _sem_green="${BASH_REMATCH[2]}" ;;
+                    color1)     _leg_red="${BASH_REMATCH[2]}" ;;
+                    color2)     _leg_green="${BASH_REMATCH[2]}" ;;
+                    color3)     _leg_yellow="${BASH_REMATCH[2]}" ;;
+                    accent)     set_if_hex ACCENT "${BASH_REMATCH[2]}" ;;
+                    foreground) set_if_hex FG "${BASH_REMATCH[2]}" ;;
+                    background) set_if_hex BG "${BASH_REMATCH[2]}" ;;
+                esac
+            fi
+        done < "$_theme"
+
+        # Semantic keys win, but only if they are actually colors: an invalid
+        # `red = "nope"` must not suppress a perfectly good `color1`.
+        set_if_hex COLOR_CRITICAL "$_sem_red"    || set_if_hex COLOR_CRITICAL "$_leg_red"    || true
+        set_if_hex COLOR_WARNING  "$_sem_yellow" || set_if_hex COLOR_WARNING  "$_leg_yellow" || true
+        set_if_hex COLOR_NORMAL   "$_sem_green"  || set_if_hex COLOR_NORMAL   "$_leg_green"  || true
+    else
+        # No Omarchy theme: try a pywal cache before the built-in defaults.
+        load_pywal
+    fi
+
+    [[ -n "$CLI_COLOR_NORMAL" ]]   && COLOR_NORMAL="$CLI_COLOR_NORMAL"
+    [[ -n "$CLI_COLOR_WARNING" ]]  && COLOR_WARNING="$CLI_COLOR_WARNING"
+    [[ -n "$CLI_COLOR_CRITICAL" ]] && COLOR_CRITICAL="$CLI_COLOR_CRITICAL"
+    DIM=$(hex_blend "$FG" "$BG")
+}
+
+state_color() {  # state_color STATE -> hex ("" for ok)
+    case "$1" in
+        critical) printf '%s' "$COLOR_CRITICAL" ;;
+        warning)  printf '%s' "$COLOR_WARNING" ;;
+        *)        printf '' ;;
+    esac
+}
+
+# ramp_color PCT -> hex on the CONTINUOUS fuel gauge.
+#
+# The same ramp the structured `palette.stops` publishes and the Omarchy panel
+# paints: critical below the critical threshold, then a linear blend up to the
+# warning threshold, then a blend up to full ok at 100%. This exists because the
+# two frontends used to disagree — waybar painted three discrete steps while the
+# panel interpolated, so one 38% battery had two different colors depending on
+# where you looked at it.
+ramp_color() {  # ramp_color PCT
+    local pct="$1" lo hi c_lo c_hi
+    (( pct < 0 )) && pct=0
+    (( pct > 100 )) && pct=100
+    if (( pct <= CRITICAL_LEVEL )); then
+        printf '%s' "$COLOR_CRITICAL"; return
+    elif (( pct <= WARNING_LEVEL )); then
+        lo=$CRITICAL_LEVEL; hi=$WARNING_LEVEL
+        c_lo="$COLOR_CRITICAL"; c_hi="$COLOR_WARNING"
+    else
+        lo=$WARNING_LEVEL; hi=100
+        c_lo="$COLOR_WARNING"; c_hi="$COLOR_NORMAL"
+    fi
+    (( hi == lo )) && { printf '%s' "$c_hi"; return; }
+    hex_lerp "$c_lo" "$c_hi" $(( (pct - lo) * 100 / (hi - lo) ))
+}
+
+hex_lerp() {  # hex_lerp FROM TO T_PERCENT
+    local a="${1#\#}" b="${2#\#}" t="$3"
+    (( t < 0 )) && t=0
+    (( t > 100 )) && t=100
+    printf '#%02x%02x%02x' \
+        $(( 16#${a:0:2} + (16#${b:0:2} - 16#${a:0:2}) * t / 100 )) \
+        $(( 16#${a:2:2} + (16#${b:2:2} - 16#${a:2:2}) * t / 100 )) \
+        $(( 16#${a:4:2} + (16#${b:4:2} - 16#${a:4:2}) * t / 100 ))
+}
+
+strip_tags() { sed 's/<[^>]*>//g' <<< "$1"; }
+
+# Tooltip markup helpers. On a plain surface they emit no color markup at all,
+# while keeping weight, glyphs and layout — the structure survives, the color
+# does not. Widths still line up because _pad()/_cpad() measure stripped text.
+tip_c() {   # tip_c COLOR TEXT
+    if $TIP_PLAIN; then printf '%s' "$2"
+    else printf "<span foreground='%s'>%s</span>" "$1" "$2"; fi
+}
+
+tip_bc() {  # tip_bc COLOR TEXT — bold, colored unless the tooltip is plain
+    if $TIP_PLAIN; then printf "<span font_weight='bold'>%s</span>" "$2"
+    else printf "<span font_weight='bold' foreground='%s'>%s</span>" "$1" "$2"; fi
+}
+
+emit_waybar() {
+    if (( CONNECTED_COUNT == 0 )); then
+        echo '{"text": ""}'
+        return
+    fi
+
+    local face_glyph class color pct_markup
+    face_glyph=$(battery_glyph "$WORST" "$ANY_CHARGING")
+    class="normal"
+    (( WORST <= WARNING_LEVEL ))  && class="warning"
+    (( WORST <= CRITICAL_LEVEL )) && class="critical"
+    color=$(ramp_color "$WORST")
+    if [[ -n "$color" ]] && ! $BAR_PLAIN; then
+        pct_markup="<span size='small' foreground='${color}'>${WORST}%</span>"
+    else
+        pct_markup="<span size='small'>${WORST}%</span>"
+    fi
+
+    # --- Tooltip: title + one row per connected device + muted freshness ---
+    local title rows=() id row_color row status _dev_hhmm
+    title=$(tip_bc "$ACCENT" "${face_glyph}  Logitech")
+    for id in "${DEVICES[@]}"; do
+        [[ "${CONNECTED[$id]}" == "1" ]] || continue
+        row_color=$(ramp_color "${BATTERY[$id]}")
+        if [[ "${CHARGING[$id]}" == "1" ]]; then status="Charging"; else status="On battery"; fi
+        row="${DEVICE_ICON[$id]} ${DEVICE_NAME[$id]}  "
+        row+="$(battery_glyph "${BATTERY[$id]}" "${CHARGING[$id]}") "
+        row+=$(tip_bc "$row_color" "${BATTERY[$id]}%")
+        row+=" $(tip_c "$DIM" "— ${status}")"
+        # Freshness is PER DEVICE here, exactly as in the Omarchy panel: each
+        # daemon writes its own device's reading at its own time, so one global
+        # "Updated" would put the newest device's time next to every other
+        # device's stale number. logibar is the family's documented exception to
+        # the single-footer rule, and this is why.
+        _dev_hhmm=$(date -d "${UPDATED[$id]}" +%H:%M 2>/dev/null)
+        [[ -n "$_dev_hhmm" ]] && row+="  $(tip_c "$DIM" "󰅐 ${_dev_hhmm}")"
+        rows+=("$row")
+    done
+
+    local INNER=0 _ln _p
+    for _ln in "$title" "${rows[@]}"; do
+        _p=$(strip_tags "$_ln"); (( ${#_p} > INNER )) && INNER=${#_p}
+    done
+    INNER=$(( INNER + 1 ))
+    _pad()  { local _s; _s=$(strip_tags "$1"); local n=$(( INNER - ${#_s} )); (( n < 0 )) && n=0; local sp; printf -v sp '%*s' "$n" ''; printf '%s%s' "$1" "$sp"; }
+    _cpad() { local _s; _s=$(strip_tags "$1"); local n=$(( INNER - ${#_s} )); (( n < 0 )) && n=0; local l=$(( n/2 )) r=$(( n - n/2 )) ls rs; printf -v ls '%*s' "$l" ''; printf -v rs '%*s' "$r" ''; printf '%s%s%s' "$ls" "$1" "$rs"; }
+
+    local B="<span foreground='${ACCENT}'>" E="</span>" NL=$'\n' TIP
+    if $TIP_PLAIN; then B=""; E=""; fi
+    local _border _sepd
+    printf -v _border '%*s' "$INNER" ''; _border="${_border// /─}"
+    printf -v _sepd '%*s' "$(( INNER - 2 ))" ''; _sepd="${_sepd// /─}"
+    if [[ "$FRAME" == "true" ]]; then
+        TIP="${B}╭${_border}╮${E}${NL}"
+        TIP+="${B}│${E}$(_cpad "$title")${B}│${E}${NL}"
+        TIP+="${B}│${E}$(_pad " $(tip_c "$DIM" "$_sepd")")${B}│${E}${NL}"
+        for row in "${rows[@]}"; do
+            TIP+="${B}│${E}$(_pad "$row")${B}│${E}${NL}"
+        done
+        TIP+="${B}╰${_border}╯${E}"
+        local _ff
+        _ff=$(sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/'\''/\&apos;/g' <<< "$FRAME_FONT")
+        TIP="<span font_family='${_ff}'>${TIP}</span>"
+    else
+        TIP=" ${title}${NL}"
+        TIP+=" $(tip_c "$DIM" "$_sepd")${NL}"
+        for row in "${rows[@]}"; do
+            TIP+="${row}${NL}"
+        done
+        TIP="${TIP%"$NL"}"
+    fi
+
+    jq -nc --arg t "$face_glyph ${pct_markup}" --arg tip "$TIP" --arg class "$class" --argjson pct "$WORST" \
+        '{text:$t, tooltip:$tip, class:$class, percentage:$pct}'
+}
+
+emit_once() {
+    read_devices
+    aggregate
+    if $JSON_MODE; then emit_json; else emit_waybar; fi
+}
+
+if $WATCH; then
+    command -v inotifywait >/dev/null 2>&1 || cli_error "--watch requires inotifywait (inotify-tools)"
+    load_theme
+    emit_once
+    mkdir -p "$STATE_DIR" 2>/dev/null
+    while inotifywait -qq -e close_write -e moved_to -e create -e delete "$STATE_DIR" 2>/dev/null; do
+        emit_once
+    done
+    exit 0
+fi
+
+# Both modes need the theme now: waybar paints with it, --json publishes it.
+load_theme
+emit_once

@@ -2,12 +2,17 @@ PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 SYSTEMD_DIR ?= $(HOME)/.config/systemd/user
 
-WIDGETS = logibar-keyboard logibar-mouse logibar-headset
+WIDGETS = logibar-status logibar-keyboard logibar-mouse logibar-headset
 DAEMONS = logibar-hidpp-monitor logibar-headset-monitor
 TOOLS = tools/logibar-hidpp-battery tools/logibar-hidpp-debug tools/logibar-headset-probe
 SERVICES = systemd/logibar-hidpp-monitor.service systemd/logibar-headset-monitor.service
 UDEV_RULE = udev/70-logitech-hidraw.rules
 UDEV_DIR ?= /etc/udev/rules.d
+OMARCHY_PLUGIN_DIR ?= $(HOME)/.config/omarchy/plugins
+
+test:
+	bash tests/test_status.sh
+	bash tests/test_legacy.sh
 
 install:
 	$(foreach f,$(WIDGETS) $(DAEMONS),install -Dm755 $(f) $(DESTDIR)$(BINDIR)/$(notdir $(f));)
@@ -32,6 +37,17 @@ endif
 
 install-all: install install-tools install-systemd
 
+# Symlink (not copy) so repo edits land in the plugin dir; reload the shell
+# to pick them up. The plugin runs logibar-status, which reads the daemons'
+# state files: both must be installed (make install install-systemd).
+install-omarchy:
+	@command -v logibar-status >/dev/null 2>&1 || echo "warning: logibar-status not found on PATH — the widget shows an error until it is installed (make install)"
+	@command -v logibar-hidpp-monitor >/dev/null 2>&1 || echo "warning: logibar daemons not found on PATH — the widget stays empty until they are installed and running (make install install-systemd)"
+	install -d "$(OMARCHY_PLUGIN_DIR)"
+	ln -sfT "$(abspath .)" "$(OMARCHY_PLUGIN_DIR)/mryll.logibar"
+	@echo 'Linked $(OMARCHY_PLUGIN_DIR)/mryll.logibar'
+	@echo 'Now add { "id": "mryll.logibar" } to a bar.layout section in ~/.config/omarchy/shell.json'
+
 uninstall:
 	$(foreach f,$(WIDGETS) $(DAEMONS),rm -f $(DESTDIR)$(BINDIR)/$(notdir $(f));)
 
@@ -53,4 +69,7 @@ endif
 
 uninstall-all: uninstall uninstall-tools uninstall-systemd
 
-.PHONY: install install-tools install-systemd install-udev install-all uninstall uninstall-tools uninstall-systemd uninstall-udev uninstall-all
+uninstall-omarchy:
+	rm -f "$(OMARCHY_PLUGIN_DIR)/mryll.logibar"
+
+.PHONY: test install install-tools install-systemd install-udev install-all install-omarchy uninstall uninstall-tools uninstall-systemd uninstall-udev uninstall-all uninstall-omarchy

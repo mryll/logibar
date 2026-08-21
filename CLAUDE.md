@@ -3,13 +3,15 @@
 ## Tooling
 
 - Install: `make install PREFIX=~/.local` (no build step)
-- No tests, linter, or CI configured
+- Tests: `make test` (or `bash tests/test_status.sh`) — hermetic suite for `logibar-status`: JSON schema, aggregation/thresholds, waybar output, argument errors, and the color chain. It fakes `HOME`/`XDG_CACHE_HOME`/`XDG_RUNTIME_DIR`, so it needs neither the daemons nor a real theme
+- No linter or CI configured; shellcheck is run ad hoc
 
 ## Non-Obvious Rules
 
-- Scripts have no file extensions: widgets (`logibar-keyboard`, `logibar-mouse`, `logibar-headset`) are Bash, daemons (`logibar-hidpp-monitor`, `logibar-headset-monitor`) and `tools/` are Python
+- Scripts have no file extensions: widgets (`logibar-status`, `logibar-keyboard`, `logibar-mouse`, `logibar-headset`) are Bash, daemons (`logibar-hidpp-monitor`, `logibar-headset-monitor`) and `tools/` are Python
+- `logibar-status` is the single source of truth for severity thresholds and aggregation — the combined waybar module and the Omarchy shell plugin (`omarchy/`) both consume it; never re-derive thresholds in a frontend
 - The three widget scripts are near-identical — only `ICON`, `ICON_CHARGING`, `TOOLTIP`, and `STATE_FILE` differ. Keep them in sync when changing shared logic
 - Widget output uses Pango markup inside JSON (`<span>` tags) — Waybar renders it
 - Daemons notify Waybar via `pkill -RTMIN+N waybar` — signal numbers are hardcoded per device and must match waybar config
 - State files are 3 lines: `battery\nconnected\ncharging` in `$XDG_RUNTIME_DIR/logibar/`
-- Python dependency is `hid` (`import hid`), packaged as `python-hid` on Arch
+- Python dependency is the Cython hidapi binding (`import hid` with `hid.device`), packaged as `python-hidapi` on Arch / `hidapi` on pip — NOT `python-hid`/`hid`, an incompatible binding that claims the same module name and makes the daemons fail silently
