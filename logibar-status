@@ -5,10 +5,12 @@
 # Severity thresholds and aggregation live HERE, once — every frontend (waybar,
 # Omarchy shell) consumes this script instead of re-deciding.
 #
-# Usage: logibar-status [--json] [--watch] [--devices LIST]
+# Usage: logibar-status [--help] [--json] [--watch] [--devices LIST]
+#                       [--no-color[=all|bar|tooltip]]
 #                       [--color-normal HEX] [--color-warning HEX] [--color-critical HEX]
 #                       [--frame] [--frame-font NAME]
 #
+#   --help      print this reference and exit 0 (also accepted as -h)
 #   default     waybar JSON for a single combined module
 #   --json      structured document (schema_version 1): devices[] + aggregate
 #   --watch     stream waybar JSON, one line per state change (needs inotifywait)
@@ -95,8 +97,21 @@ WATCH=false
 PLAIN_SURFACES=""   # "" | all | bar | tooltip — which surfaces drop color
 _nc=""
 DEVICES=("${DEVICE_IDS[@]}")
+# --help / -h: the reference the user needs is already the header comment of
+# this file, so print that rather than a second copy that can drift from it.
+# The block runs from the "# Usage:" line to the first line that is not a
+# comment, with the leading "# " stripped. Plain text on stdout, exit 0 —
+# --json does not apply: a human asked.
+show_help() {
+    awk '/^# Usage:/ { p = 1 }
+         p && !/^#/  { exit }
+         p           { sub(/^#( |$)/, ""); print }' "${BASH_SOURCE[0]}"
+    exit 0
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --help|-h) show_help ;;
         --json) shift ;;   # consumed by the pre-scan
         --watch) WATCH=true; shift ;;
         --devices)
