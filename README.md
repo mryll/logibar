@@ -110,6 +110,8 @@ Add these lines to `~/.config/waybar/config.jsonc`:
 }
 ```
 
+Run `logibar-status --help` for the full reference: the usage line, every flag, and the format placeholders.
+
 `--watch` prints a new line on each change, so the bar does not poll. This flag needs `inotify-tools`. Without that package, use `"exec": "logibar-status"` and select your own `"interval"`. To hide a device, give the names of the devices that you want: `--devices keyboard,mouse`.
 
 ### Waybar: one module per device
