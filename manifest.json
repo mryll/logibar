@@ -29,8 +29,13 @@
         "key": "colorMode",
         "type": "enum",
         "label": "Colors",
-        "description": "Where the battery colors are used. Monochrome surfaces keep their glyphs and meters, drawn in the theme foreground.",
-        "options": ["full", "none", "bar-only", "panel-only"],
+        "description": "Monochrome rendering uses foreground tones only — severity stays readable through the numbers and glyphs. none: no color anywhere. bar-only: colored bar face, plain panel. panel-only: the reverse.",
+        "options": [
+          "full",
+          "none",
+          "bar-only",
+          "panel-only"
+        ],
         "defaultValue": "full"
       },
       {
