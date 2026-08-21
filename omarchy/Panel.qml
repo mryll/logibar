@@ -28,6 +28,7 @@ Panel {
   id: root
   moduleName: "mryll.logibar"
   ipcTarget: "mryll.logibar"
+  manageIpc: false
 
   property var anchorItem: null
 
@@ -46,7 +47,7 @@ Panel {
   readonly property color foreground: Color.popups.text
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.55)
-  readonly property color track: Style.selectedFillFor(foreground, Color.accent)
+  readonly property color track: Style.selectedFillFor(foreground, Color.accent, urgent)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property bool vertical: bar ? bar.vertical : false
 
@@ -112,8 +113,13 @@ Panel {
   // draws in foreground tones only — no ramp, no accent, no urgent — while
   // keeping glyphs, meters and layout. Severity stays readable as text and
   // glyphs, and the JSON `state` field still carries it for anything scripted.
-  readonly property string colorMode: String(setting("colorMode", "full"))
-  readonly property bool barColored: colorMode === "full" || colorMode === "bar-only"
+  // An unrecognized value normalizes to "full": a hand-edited shell.json must
+  // not be able to silently take the color off both surfaces.
+  readonly property string colorMode: {
+    var v = String(setting("colorMode", "full"))
+    return ["full", "none", "bar-only", "panel-only"].indexOf(v) >= 0 ? v : "full"
+  }
+  readonly property bool barColored:   colorMode === "full" || colorMode === "bar-only"
   readonly property bool panelColored: colorMode === "full" || colorMode === "panel-only"
 
   // Surface-aware wrappers around the ramp. Kept separate so "bar-only" and
@@ -324,6 +330,21 @@ Panel {
   property string capturedText: ""
   property int exitCode: 0
   property var pendingCmd: null
+
+  // The shell's base handler covers open/close/show/hide/toggle; this one adds
+  // `refresh` so a keybind or a script can force a fetch without opening the
+  // panel. Overriding means restating the five, so `manageIpc: false` above
+  // turns the base one off and this is the only handler on the target.
+  IpcHandler {
+    target: root.ipcTarget
+
+    function open(): void { root.open() }
+    function close(): void { root.close() }
+    function show(): void { root.open() }
+    function hide(): void { root.close() }
+    function toggle(): void { root.toggle() }
+    function refresh(): void { root.refresh() }
+  }
 
   function refresh() {
     // The host injects `settings` during construction, before bindings are
