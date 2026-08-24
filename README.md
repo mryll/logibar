@@ -293,19 +293,28 @@ The Omarchy plugin has the same four states in its `colorMode` setting.
 > #custom-logibar.critical { color: #cc241d; font-weight: bold; }
 > ```
 
-### Framed tooltip
+### Tooltip font
 
-By default, the tooltip has no border, and it uses the font of your bar. To draw the box, add `--frame`:
+The tooltip is pinned to a monospace font. That is not decoration: its rules are box-drawing characters, and in a proportional font one of those is nearly twice as wide as a letter. The tooltip then sizes itself to the rules, and a dead margin opens to the right of the text. Waybar draws the tooltip in a GTK window that ignores `font-family` from your CSS, so the markup is the only place this can be said.
 
-```bash
-logibar-status --frame
+The default is a **list** of families, tried in order:
+
+```
+JetBrainsMono Nerd Font Mono, JetBrainsMono Nerd Font, monospace
 ```
 
-A frame needs a font that gives all characters the same width. This mode uses `JetBrainsMono Nerd Font Mono` for that reason. To use a different font:
+Pango falls through to the next name when one is not installed. This matters: the Arch package `ttf-jetbrains-mono-nerd` does **not** ship the `…Mono` family, so pinning that one name alone used to fall back to your system's proportional font without saying so.
+
+To use a different font, name any monospace family (or your own list):
 
 ```bash
-logibar-status --frame --frame-font "FiraCode Nerd Font Mono"
+logibar-status --tooltip-font "FiraCode Nerd Font Mono"
 ```
+
+> [!NOTE]
+> **`--frame` and `--frame-font` are deprecated.** `--frame` drew the tooltip as a bordered card. It is still accepted, so an existing Waybar config keeps working, but it now does nothing; `--frame-font` is an alias for `--tooltip-font`.
+>
+> The box was a second way of drawing the same content — more code, more documentation, more screenshots — and it only lined up when the pinned font was a complete Mono Nerd Font. Pinning the font on the one remaining tooltip gives the alignment without the box.
 
 ### Spacing
 
