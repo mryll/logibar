@@ -8,6 +8,8 @@
 
 ## Non-Obvious Rules
 
+- **A tooltip meter is PARKED, not rendered in place.** The bar has to reach the tooltip's right edge, and that edge is the widest TEXT line — which does not exist yet while the lines are being collected. So a meter pushes `METER:<i>` into `lines` plus one entry in the parallel `meter_*` arrays, and the width pass resolves it. The width pass MUST skip `METER:` lines, or the measurement is circular. Every meter in one tooltip gets the SAME bar length: they stack, so a reader compares them against each other.
+
 - Scripts have no file extensions: widgets (`logibar-status`, `logibar-keyboard`, `logibar-mouse`, `logibar-headset`) are Bash, daemons (`logibar-hidpp-monitor`, `logibar-headset-monitor`) and `tools/` are Python
 - `logibar-status` is the single source of truth for severity thresholds and aggregation — the combined waybar module and the Omarchy shell plugin (`omarchy/`) both consume it; never re-derive thresholds in a frontend
 - The three widget scripts are near-identical — only `ICON`, `ICON_CHARGING`, `TOOLTIP`, and `STATE_FILE` differ. Keep them in sync when changing shared logic

@@ -111,7 +111,9 @@ To remove any of them, use the same name with `uninstall`, such as `make uninsta
 
 ### Waybar: one module for every device
 
-The bar shows the battery of the device with the lowest charge. The tooltip lists all the devices.
+The bar shows the battery of the device with the lowest charge. The tooltip gives one block for each connected device: the device with its glyph, a level meter, and one line with the charge state and the time of that device's last reading.
+
+The time is per device, not per tooltip. Each daemon writes its own device's reading at its own time, so a single "Updated" line would put the newest device's time next to every other device's older number.
 
 ![The Waybar bar module](screenshots/waybar-bar.png)
 ![The Waybar tooltip](screenshots/waybar-tooltip.png)

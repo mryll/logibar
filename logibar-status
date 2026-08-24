@@ -454,6 +454,51 @@ tip_bc() {  # tip_bc COLOR TEXT — bold, colored unless the tooltip is plain
     else printf "<span font_weight='bold' foreground='%s'>%s</span>" "$1" "$2"; fi
 }
 
+# --- The meter row spans the tooltip -------------------------------------
+# The same house rule claudebar, codexbar and printbar follow: a meter row is
+# <indent><bar><gap><level>, and the level is right-aligned on the tooltip's
+# inner width — the column the longest text line ends on.
+TIP_IND=3           # spaces before the bar
+TIP_VAL=6           # level column, wide enough for "100%"
+TIP_GAP_MIN=2       # smallest gap between the bar and the level
+TIP_BAR_MIN=20      # a short tooltip still gets a readable bar
+TIP_BAR_MAX=48      # one long line must not stretch the bar into a ruler
+
+# Per-cell gradient for a bar fill. Cell k takes the ramp color of its CENTRE,
+# the honest sample for that quantisation — reading a cell's color off an
+# endpoint would claim a precision the cell does not have. The Omarchy panel
+# sweeps the same ramp across its own fill, so the two frontends draw ONE meter
+# instead of two that happen to agree on the number.
+_grad_cells=()
+_init_grad() {  # _init_grad CELLS
+    local k
+    _grad_cells=()
+    for (( k = 0; k < $1; k++ )); do
+        _grad_cells[k]=$(ramp_color $(( (k * 100 + 50) / $1 )))
+    done
+}
+
+_make_bar() {  # _make_bar PCT CELLS
+    local p=$1 n=$2 filled k out="" rest
+    filled=$(( p * n / 100 ))
+    (( filled > n )) && filled=$n
+    (( filled < 0 )) && filled=0
+    # A level that is not zero never draws an empty bar: 8% is the case a
+    # reader most needs to see, and rounding it to nothing hides it.
+    (( p > 0 && filled == 0 )) && filled=1
+    printf -v rest '%*s' "$(( n - filled ))" ''; rest="${rest// /░}"
+    if $TIP_PLAIN; then
+        printf -v out '%*s' "$filled" ''
+        printf '%s%s' "${out// /█}" "$rest"
+        return
+    fi
+    for (( k = 0; k < filled; k++ )); do
+        out+="<span foreground='${_grad_cells[k]}'>█</span>"
+    done
+    [[ -n "$rest" ]] && out+="<span foreground='${DIM}'>${rest}</span>"
+    printf '%s' "$out"
+}
+
 emit_waybar() {
     if (( CONNECTED_COUNT == 0 )); then
         echo '{"text": ""}'
@@ -472,36 +517,84 @@ emit_waybar() {
         pct_markup="<span size='small'>${WORST}%</span>"
     fi
 
-    # --- Tooltip: title + one row per connected device + muted freshness ---
-    local title rows=() id row_color row status _dev_hhmm
-    title=$(tip_bc "$ACCENT" "${face_glyph}  Logitech")
+    # --- Tooltip: title + one BLOCK per connected device + muted freshness ---
+    #
+    # A block is the same three lines every sibling widget draws: the name with
+    # its glyph, the meter with the level right-aligned, and one dim line that
+    # explains the number. Before this, logibar was the only widget in the
+    # family whose tooltip had no bar at all — it printed one flat row per
+    # device while its own Omarchy panel drew a real meter for each one, so the
+    # two frontends of one product did not look like one product.
+    local lines=() id status _dev_hhmm _bglyph
+    local meter_pct=() meter_color=() meter_label=()
+    lines+=(" $(tip_bc "$ACCENT" "${face_glyph}  Logitech")")
+    lines+=("SEP")
     for id in "${DEVICES[@]}"; do
         [[ "${CONNECTED[$id]}" == "1" ]] || continue
-        row_color=$(ramp_color "${BATTERY[$id]}")
         if [[ "${CHARGING[$id]}" == "1" ]]; then status="Charging"; else status="On battery"; fi
-        row="${DEVICE_ICON[$id]} ${DEVICE_NAME[$id]}  "
-        row+="$(battery_glyph "${BATTERY[$id]}" "${CHARGING[$id]}") "
-        row+=$(tip_bc "$row_color" "${BATTERY[$id]}%")
-        row+=" $(tip_c "$DIM" "— ${status}")"
+        _bglyph=$(battery_glyph "${BATTERY[$id]}" "${CHARGING[$id]}")
+        lines+=("")
+        lines+=(" $(tip_c "$FG" "  ${DEVICE_ICON[$id]}  ${DEVICE_NAME[$id]}")")
+        # Parked: the bar length is not known until every other line exists.
+        meter_pct+=("${BATTERY[$id]}")
+        meter_color+=("$(ramp_color "${BATTERY[$id]}")")
+        meter_label+=("${BATTERY[$id]}%")
+        lines+=("METER:$(( ${#meter_pct[@]} - 1 ))")
         # Freshness is PER DEVICE here, exactly as in the Omarchy panel: each
         # daemon writes its own device's reading at its own time, so one global
         # "Updated" would put the newest device's time next to every other
         # device's stale number. logibar is the family's documented exception to
         # the single-footer rule, and this is why.
         _dev_hhmm=$(date -d "${UPDATED[$id]}" +%H:%M 2>/dev/null)
-        [[ -n "$_dev_hhmm" ]] && row+="  $(tip_c "$DIM" "󰅐 ${_dev_hhmm}")"
-        rows+=("$row")
+        if [[ -n "$_dev_hhmm" ]]; then
+            lines+=(" $(tip_c "$DIM" "  ${_bglyph}  ${status}  ·  Updated ${_dev_hhmm}")")
+        else
+            lines+=(" $(tip_c "$DIM" "  ${_bglyph}  ${status}")")
+        fi
     done
 
+    # The meters are skipped: their width is DERIVED from this number, so
+    # measuring them here would be circular.
     local INNER=0 _ln _p
-    for _ln in "$title" "${rows[@]}"; do
+    for _ln in "${lines[@]}"; do
+        [[ "$_ln" == "SEP" || "$_ln" == METER:* ]] && continue
         _p=$(strip_tags "$_ln"); (( ${#_p} > INNER )) && INNER=${#_p}
     done
     INNER=$(( INNER + 1 ))
-    local B="<span foreground='${ACCENT}'>" E="</span>" NL=$'\n' TIP
-    if $TIP_PLAIN; then B=""; E=""; fi
-    local _sepd
+
+    # ONE bar length for the whole tooltip. The meters stack, so a reader
+    # compares them against each other; a per-row length would turn that
+    # comparison into a lie.
+    #
+    # A rule carries one leading space and INNER-2 cells, so it ends on column
+    # INNER-1. THAT column is the tooltip's right edge, and the level has to
+    # land on it — not on INNER, which nothing else reaches.
+    local _right=$(( INNER - 1 )) _barlen _roww
+    _barlen=$(( _right - TIP_IND - TIP_GAP_MIN - TIP_VAL ))
+    (( _barlen < TIP_BAR_MIN )) && _barlen=$TIP_BAR_MIN
+    (( _barlen > TIP_BAR_MAX )) && _barlen=$TIP_BAR_MAX
+    _roww=$(( TIP_IND + _barlen + TIP_GAP_MIN + TIP_VAL ))
+    if (( _roww > _right )); then _right=$_roww; INNER=$(( _right + 1 )); fi
+
+    _init_grad "$_barlen"
+    local _i _m _mbar _mlbl _mpad _mgap _tip_ind
+    printf -v _tip_ind '%*s' "$TIP_IND" ''
+    for _i in "${!lines[@]}"; do
+        [[ "${lines[$_i]}" == METER:* ]] || continue
+        _m=${lines[$_i]#METER:}
+        _mbar=$(_make_bar "${meter_pct[$_m]}" "$_barlen")
+        _mlbl="${meter_label[$_m]}"
+        # The gap absorbs the level's own width, so the LAST character of the
+        # level lands on the right edge whatever the level says.
+        _mpad=$(( _right - TIP_IND - _barlen - ${#_mlbl} ))
+        (( _mpad < 1 )) && _mpad=1
+        printf -v _mgap '%*s' "$_mpad" ''
+        lines[$_i]="${_tip_ind}${_mbar}${_mgap}$(tip_bc "${meter_color[$_m]}" "$_mlbl")"
+    done
+
+    local NL=$'\n' TIP _sepd _sep
     printf -v _sepd '%*s' "$(( INNER - 2 ))" ''; _sepd="${_sepd// /─}"
+    _sep=" $(tip_c "$DIM" "$_sepd")"
 
     # Una sola forma de tooltip, con la fuente fijada.
     #
@@ -511,10 +604,9 @@ emit_waybar() {
     # derecha del texto. Waybar renderiza el tooltip en una ventana GTK que
     # IGNORA font-family del CSS, así que el markup es el único lugar donde
     # esto se puede decir.
-    TIP=" ${title}${NL}"
-    TIP+=" $(tip_c "$DIM" "$_sepd")${NL}"
-    for row in "${rows[@]}"; do
-        TIP+="${row}${NL}"
+    TIP=""
+    for _ln in "${lines[@]}"; do
+        if [[ "$_ln" == "SEP" ]]; then TIP+="${_sep}${NL}"; else TIP+="${_ln}${NL}"; fi
     done
     TIP="${TIP%"$NL"}"
     local _tf
