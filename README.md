@@ -5,7 +5,26 @@
 
 logibar shows the battery level of your Logitech Lightspeed devices — keyboard, mouse and headset — in your status bar. It runs on Waybar and on the Omarchy shell (Quickshell). It reads each battery over HID++, and it does not need a daemon from the vendor. It refreshes when a device wakes, goes to sleep, or when a charge cycle begins.
 
-![The Omarchy panel: three devices with battery meters](screenshots/omarchy-panel.png)
+The same core drives both frontends, so a number reads the same on either one:
+
+| The Omarchy shell plugin | The Waybar module |
+| :---: | :---: |
+| <img src="screenshots/omarchy-desktop.png" alt="logibar in the Omarchy shell: the bar face and the battery panel"> | <img src="screenshots/waybar-desktop.png" alt="logibar in Waybar: the bar face and the battery tooltip"> |
+
+## Contents
+
+- [Features](#features)
+- [Supported devices](#supported-devices)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Omarchy shell plugin](#omarchy-shell-plugin)
+- [Configuration](#configuration)
+- [Structured JSON output](#structured-json-output)
+- [How it works](#how-it-works)
+- [Add a device](#add-a-device)
+- [Troubleshooting](#troubleshooting)
+- [Related](#related)
 
 ## Features
 
@@ -153,10 +172,6 @@ The three original modules still work, and they now share the colors of the comb
 
 The plugin in [`omarchy/`](omarchy/) is a native widget for the bar of the [Omarchy](https://github.com/basecamp/omarchy) shell. The face of the bar shows the same short summary as Waybar. A click opens a panel with one row for each device. The row shows the name, an animated battery meter, the charge, the charging state, and the time of the last update.
 
-<p align="center">
-  <img src="screenshots/omarchy-desktop.png" alt="logibar in the Omarchy bar, with its panel open" width="960">
-</p>
-
 ![The logibar face in the Omarchy bar](screenshots/omarchy-bar.png)
 
 ![The Omarchy panel](screenshots/omarchy-panel.png)
@@ -187,6 +202,13 @@ Mouse buttons: **left** opens the panel, **middle** refreshes the panel. The wid
 
 > [!TIP]
 > After you edit a file in `omarchy/`, run `omarchy restart shell`. A rescan of the plugins does not compile the QML again.
+
+The plugin also answers the shell's IPC, so a keybind or a script can drive it without the mouse:
+
+```bash
+qs ipc call mryll.logibar toggle    # open or close the panel
+qs ipc call mryll.logibar refresh   # fetch now, without opening anything
+```
 
 ## Configuration
 
@@ -456,10 +478,10 @@ logibar-status --json | jq
 
 ## Related
 
-- [claudebar](https://github.com/mryll/claudebar) — Claude AI usage widget for Waybar
-- [codexbar](https://github.com/mryll/codexbar) — OpenAI Codex usage widget for Waybar
-- [meteobar](https://github.com/mryll/meteobar) — Weather widget for Waybar (Open-Meteo)
-- [tickerbar](https://github.com/mryll/tickerbar) — Multi-market price ticker for Waybar (crypto, stocks, forex)
-- [Solaar](https://github.com/pwr-Solaar/Solaar) — Full-featured Logitech device manager (much heavier, GUI-based)
-- [Omarchy](https://github.com/basecamp/omarchy) — Beautiful, modern & opinionated Linux distribution
-- [Waybar](https://github.com/Alexays/Waybar) — Status bar for Wayland compositors
+- [claudebar](https://github.com/mryll/claudebar) — Claude AI plan usage
+- [codexbar](https://github.com/mryll/codexbar) — OpenAI Codex subscription usage
+- [meteobar](https://github.com/mryll/meteobar) — the weather, from Open-Meteo
+- [printbar](https://github.com/mryll/printbar) — any printer: supplies, trays and queue
+- [tickerbar](https://github.com/mryll/tickerbar) — prices of crypto, stocks, indices, commodities and forex
+- [Omarchy](https://github.com/basecamp/omarchy) — the Linux setup for these widgets
+- [Waybar](https://github.com/Alexays/Waybar) — the status bar for Wayland

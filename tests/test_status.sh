@@ -371,9 +371,14 @@ check "plain output keeps the device glyphs" \
     jq -e '.tooltip | test("󰌌")' <<< "$(run_status --no-color)"
 check "plain output keeps bold weight and box drawing" \
     jq -e '.tooltip | test("font_weight=.bold.") and test("─")' <<< "$(run_status --no-color)"
-check "plain framed tooltip keeps its frame" \
-    jq -e '.tooltip | test("╭") and test("╰")' <<< "$(run_status --no-color --frame)"
-check "framed plain tooltip has no color markup" \
+# --frame is deprecated and a no-op: still ACCEPTED (an existing Waybar config
+# keeps working) and it draws nothing. The font pin survives monochrome, because
+# it is what keeps the rule the same width as the text it underlines.
+check "deprecated --frame draws no box" \
+    jq -e '.tooltip | test("╭") | not' <<< "$(run_status --no-color --frame)"
+check "deprecated --frame keeps the font pin" \
+    jq -e '.tooltip | test("font_family=")' <<< "$(run_status --no-color --frame)"
+check "plain tooltip has no color markup" \
     jq -e '.tooltip | test("foreground=") | not' <<< "$(run_status --no-color --frame)"
 
 # The class field is a machine contract: monochrome users style it from CSS.
