@@ -237,6 +237,10 @@ case "$PLAIN_SURFACES" in
 esac
 
 command -v jq >/dev/null 2>&1 || cli_error "jq is required"
+# dd belongs here: read_bounded uses it for the only open(2) in coreutils that
+# does not block on a FIFO, so a missing dd is a missing guard, not a missing
+# convenience.
+command -v dd >/dev/null 2>&1 || cli_error "dd is required"
 $JSON_MODE && $WATCH && cli_error "--watch only makes sense in waybar mode"
 
 # --- Read state files into parallel arrays ---
