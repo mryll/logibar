@@ -81,9 +81,19 @@ def enable_notifications(dev):
     except:
         pass
 
+# Every other read loop in this file is already capped by a `range()`; this one
+# was the exception. `while True` trusts the device to eventually go quiet, and
+# a device that answers for ever — a wedged receiver, or anything plugged into
+# the same VID/PID — spins this thread at 100% and it never returns to the
+# event loop, so the widget freezes on its last reading. It cannot grow memory
+# (every read is a fresh 64-byte buffer that is dropped) but it never ends.
+# The cap converts "never returns" into "gives up and re-queries", which the
+# retry/backoff in the callers already handles.
+FLUSH_MAX_PACKETS = 64
+
 def flush_buffer(dev):
     try:
-        while True:
+        for _ in range(FLUSH_MAX_PACKETS):
             r = dev.read(64, timeout_ms=5)
             if not r:
                 break

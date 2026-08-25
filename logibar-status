@@ -55,6 +55,32 @@ fi
 
 STATE_DIR="${XDG_RUNTIME_DIR:-/run/user/$UID}/logibar"
 
+# --- Bounded reads of files this script does not own ---
+# Every file read below belongs to somebody else. A widget is not the owner of
+# the files it reads, so it must not assume any of them is a regular file of
+# sane size. Two failure modes, and both are fatal HERE rather than merely
+# annoying, because the Omarchy shell runs this plugin INSIDE its own
+# long-lived process: a read that never returns hangs the whole shell, and a
+# read that never ends eats the shell's memory, not the widget's.
+#   - a FIFO in place of the file blocks the open() until somebody writes,
+#     which is for ever if nobody does
+#   - a multi-gigabyte file is read to the end by sed/jq/read before anyone
+#     gets to look at line 1
+# `-f` closes the first and `head -c` closes the second. Truncation is safe by
+# construction downstream: a half-read state file fails the numeric check, a
+# half-read theme drops its last key, a half-read JSON makes jq fail — all
+# three already mean "no data" on this path, never a wrong answer.
+read_bounded() {  # read_bounded PATH MAXBYTES
+    [[ -f "$1" ]] || return 1        # -f is false for FIFO, socket, directory and device
+    LC_ALL=C head -c "$2" -- "$1"
+}
+
+# The theme and the pywal cache are hand-written TOML/JSON: 256 KiB is orders
+# of magnitude past any real one. A state file is three lines — battery,
+# connected, charging — so 64 KiB is already absurdly generous.
+MAX_THEME_BYTES=$((256 * 1024))
+MAX_STATE_BYTES=$((64 * 1024))
+
 # Device registry — ids, Nerd Font identity glyphs, display names.
 DEVICE_IDS=(keyboard mouse headset)
 declare -A DEVICE_ICON=([keyboard]="󰌌" [mouse]="󰍽" [headset]="󰋎")
@@ -210,14 +236,16 @@ $JSON_MODE && $WATCH && cli_error "--watch only makes sense in waybar mode"
 # Sets: BATTERY[id] CONNECTED[id] CHARGING[id] STATE[id] UPDATED[id]
 declare -A BATTERY CONNECTED CHARGING STATE UPDATED
 read_devices() {
-    local id file battery connected charging
+    local id file battery connected charging blob
     for id in "${DEVICES[@]}"; do
         file="$STATE_DIR/$id"
         BATTERY[$id]=""; CONNECTED[$id]=0; CHARGING[$id]=0; STATE[$id]="disconnected"; UPDATED[$id]=""
-        [[ -f "$file" ]] || continue
-        battery=$(sed -n '1p' "$file")
-        connected=$(sed -n '2p' "$file")
-        charging=$(sed -n '3p' "$file")
+        # One bounded read instead of three `sed -n Np`: it also collapses
+        # three opens of a file somebody else writes into one, so the state
+        # cannot change shape between the first line and the third.
+        blob=$(read_bounded "$file" "$MAX_STATE_BYTES") || continue
+        battery=""; connected=""; charging=""
+        { IFS= read -r battery; IFS= read -r connected; IFS= read -r charging; } <<< "$blob"
         UPDATED[$id]=$(date -Iseconds -d "@$(stat -c %Y "$file" 2>/dev/null || echo 0)" 2>/dev/null)
         [[ "$battery" =~ ^[0-9]+$ ]] || continue
         if [[ "$connected" != "1" ]] || [[ "$battery" -eq 0 ]]; then
@@ -321,7 +349,10 @@ hex_blend() {  # average two #RRGGBB colors
 # Missing file, unreadable file, or invalid JSON: leave every default alone.
 load_pywal() {
     local _cache="${XDG_CACHE_HOME:-$HOME/.cache}/wal/colors.json"
-    [[ -r "$_cache" ]] || return 0
+    # jq gets the cache on stdin, never as a path: read_bounded is what decides
+    # this is a regular file of bounded size, and jq must not re-open it.
+    local _blob
+    _blob=$(read_bounded "$_cache" "$MAX_THEME_BYTES") || return 0
 
     # One jq pass, one value per line; `// ""` covers missing keys. Line-based
     # (not tab-separated) on purpose: tab is IFS whitespace, so `read` would
@@ -333,7 +364,7 @@ load_pywal() {
                                 (.colors.color1 // ""), (.colors.color2 // ""),
                                 (.colors.color3 // ""),
                                 (.colors.color4 // .special.cursor // "")' \
-                             "$_cache" 2>/dev/null)
+                             <<< "$_blob" 2>/dev/null)
     [[ ${#_vals[@]} -eq 6 ]] || return 0
 
     local _fg="${_vals[0]}" _bg="${_vals[1]}" _red="${_vals[2]}"
@@ -361,7 +392,11 @@ load_theme() {
     # resolve after the loop so the semantic names always win.
     local _sem_red="" _sem_yellow="" _sem_green=""
     local _leg_red="" _leg_yellow="" _leg_green=""
-    if [[ -f "$_theme" ]]; then
+    # The whole theme is pulled in bounded, then parsed from memory. Redirecting
+    # the loop straight from the path would hand `read` a descriptor this script
+    # never vetted — the FIFO case blocks the loop's first iteration for ever.
+    local _blob
+    if _blob=$(read_bounded "$_theme" "$MAX_THEME_BYTES"); then
         while IFS= read -r line; do
             [[ "$line" =~ ^[[:space:]]*# ]] && continue
             [[ -z "${line// /}" ]] && continue
@@ -378,7 +413,7 @@ load_theme() {
                     background) set_if_hex BG "${BASH_REMATCH[2]}" ;;
                 esac
             fi
-        done < "$_theme"
+        done <<< "$_blob"
 
         # Semantic keys win, but only if they are actually colors: an invalid
         # `red = "nope"` must not suppress a perfectly good `color1`.

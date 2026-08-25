@@ -19,8 +19,10 @@ import qs.Ui
 // labels, hero glyph, and the bar face are tinted by the JSON's severity
 // `state` (the semantic source of truth), never by a value-following ramp.
 //
-// Updates stay event-driven: FileView watchers on the daemons' state files
-// only trigger a re-run of logibar-status (plus a 30s safety net). Nothing
+// Updates stay event-driven: one watch on the state DIRECTORY only rings a
+// doorbell that re-runs logibar-status (plus a 30s safety net). Nothing in
+// this file ever reads a state file — the CLI is the only reader, and it is
+// the only side with a bounded, regular-file-only read. Nothing
 // animates while idle, and every color initializes at its final value — a
 // mid-flight Behavior interrupted by the bar's startup animation gate freezes
 // otherwise (learned the hard way).
@@ -378,15 +380,21 @@ Panel {
 
   function finalizeRun() {
     var text = capturedText.trim()
-    if (text === "")
+    if (text === "") {
       // The install hint lives HERE and not in the core, which is where every
       // other message of this family lives. The one message the core cannot
       // emit is the one about its own absence.
-      setError(binName + " produced no output — not installed or not on PATH?\n\n"
-               + "Install it with:  yay -S logibar\n"
-               + "Then open this panel again.")
-    else
+      //
+      // Only if nothing has explained it already. The StdioCollector tripwire
+      // below also leaves capturedText empty, and there "not installed" is a
+      // lie: the binary answered, it answered too much.
+      if (root.loadError === "")
+        setError(binName + " produced no output — not installed or not on PATH?\n\n"
+                 + "Install it with:  yay -S logibar\n"
+                 + "Then open this panel again.")
+    } else {
       handle(text)
+    }
     if (pendingCmd) {
       var c = pendingCmd
       pendingCmd = null
@@ -471,8 +479,21 @@ Panel {
     }
     stdout: StdioCollector {
       waitForEnd: true
+      // A tripwire, not a limit. StdioCollector has already buffered the whole
+      // stream by the time this runs, so this cannot cap the peak memory — the
+      // real bound is in the CLI, which reads every file and every response
+      // under a byte cap of its own. What this does is refuse to RETAIN an
+      // answer that is far outside anything the CLI can legitimately produce,
+      // and say so, instead of parsing megabytes of unknown text into the
+      // long-lived shell process.
+      readonly property int maxBytes: 1024 * 1024
       onStreamFinished: {
-        root.capturedText = text
+        if (text.length > maxBytes) {
+          root.capturedText = ""
+          root.setError(root.binName + " returned more than " + (maxBytes / 1024) + " KiB — refusing it")
+        } else {
+          root.capturedText = text
+        }
         root.collectorDone = true
         root.maybeFinalize()
       }
@@ -488,31 +509,36 @@ Panel {
 
   // ---------------------------------------------------------------- triggers
 
-  // Directory watch catches state files created after load (FileView cannot
-  // watch a file that doesn't exist yet); per-file watchers catch content
-  // updates; the 30s timer covers daemons started after the shell, when even
-  // the directory may be missing at load.
+  // ONE watch, on the DIRECTORY, and it is a doorbell — never a reader.
+  //
+  // This used to be a directory watch plus one FileView per state file, and
+  // those per-file views called reload() on every change. That pulled the
+  // daemons' files INTO the shell process: a FileView opens and loads before
+  // any QML of ours can look at what it opened, so a same-user process that
+  // swaps `$XDG_RUNTIME_DIR/logibar/mouse` for a FIFO stalls the shell, and
+  // one that swaps it for a huge file makes the shell hold it in memory. The
+  // bounded-read guard in logibar-status cannot help here: it protects the
+  // CLI's own reads, and the FileView never went through the CLI.
+  //
+  // Worse, the load was pure waste — nothing here ever read `.text()`. The
+  // handlers only called refresh(), which runs the CLI, which is the one
+  // thing on this path that vets a path before reading it.
+  //
+  // Per-file watches are also redundant: both daemons publish state the same
+  // way, mkstemp + rename into this directory, so every single update is a
+  // directory-entry event this watch already sees. A directory has no content
+  // to load — `preload: false` skips even the attempt, and neither `.text()`
+  // nor `.data()` nor `reload()` is called anywhere in this file.
+  //
+  // The 30s timer below stays the safety net (a daemon started after the
+  // shell, when even the directory is missing at load), and the panel also
+  // refreshes on open, so a missed doorbell is bounded and invisible.
   FileView {
     path: root.stateDir
     watchChanges: true
+    preload: false
     printErrors: false
     onFileChanged: root.refresh()
-  }
-
-  Repeater {
-    model: ["keyboard", "mouse", "headset"]
-    delegate: Item {
-      id: watcher
-      required property string modelData
-      FileView {
-        path: root.stateDir !== "" ? root.stateDir + "/" + watcher.modelData : ""
-        watchChanges: true
-        printErrors: false
-        onLoaded: root.refresh()
-        onFileChanged: reload()
-        onLoadFailed: root.refresh()
-      }
-    }
   }
 
   Timer {

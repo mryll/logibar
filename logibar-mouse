@@ -10,6 +10,31 @@
 # so CSS styling keeps working.
 
 STATE_FILE="${XDG_RUNTIME_DIR:-/run/user/$UID}/logibar/mouse"
+
+# --- Bounded reads of files this script does not own ---
+# Every file read below belongs to somebody else. A widget is not the owner of
+# the files it reads, so it must not assume any of them is a regular file of
+# sane size. Two failure modes, and both are fatal HERE rather than merely
+# annoying, because the Omarchy shell runs this plugin INSIDE its own
+# long-lived process: a read that never returns hangs the whole shell, and a
+# read that never ends eats the shell's memory, not the widget's.
+#   - a FIFO in place of the file blocks the open() until somebody writes,
+#     which is for ever if nobody does
+#   - a multi-gigabyte file is read to the end by sed/jq/read before anyone
+#     gets to look at line 1
+# `-f` closes the first and `head -c` closes the second. Truncation is safe by
+# construction downstream: a half-read state file fails the numeric check
+# below, which already means "hide the widget", never a wrong reading.
+read_bounded() {  # read_bounded PATH MAXBYTES
+    [[ -f "$1" ]] || return 1        # -f is false for FIFO, socket, directory and device
+    LC_ALL=C head -c "$2" -- "$1"
+}
+
+# A state file is three lines — battery, connected, charging — so 64 KiB is
+# already absurdly generous. This widget reads no theme: its palette comes
+# from `logibar-status --json`, which bounds the theme read on its own side.
+MAX_STATE_BYTES=$((64 * 1024))
+
 ICON="󰍽"
 ICON_CHARGING="󰍽 ⚡"
 TOOLTIP="PRO X Superlight 2"
@@ -131,14 +156,17 @@ DIM=$(hex_blend "$FG" "$BG")
 BAR_EMPTY=$(hex_blend "$BG" "$DIM")
 
 # --- Read state ---
-if [[ ! -f "$STATE_FILE" ]]; then
+# One bounded read instead of three `sed -n Np`: it also collapses three opens
+# of a file the daemon owns into one, so the state cannot change shape between
+# the first line and the third. A missing file, a FIFO, a directory or a
+# device node all land here as "no state", which is the empty module.
+if ! _state=$(read_bounded "$STATE_FILE" "$MAX_STATE_BYTES"); then
     echo '{"text": ""}'
     exit 0
 fi
 
-BATTERY=$(sed -n '1p' "$STATE_FILE")
-CONNECTED=$(sed -n '2p' "$STATE_FILE")
-CHARGING=$(sed -n '3p' "$STATE_FILE")
+BATTERY=""; CONNECTED=""; CHARGING=""
+{ IFS= read -r BATTERY; IFS= read -r CONNECTED; IFS= read -r CHARGING; } <<< "$_state"
 
 if [[ -z "$BATTERY" ]] || [[ "$BATTERY" == "0" ]] || [[ "$CONNECTED" != "1" ]]; then
     echo '{"text": ""}'
