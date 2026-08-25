@@ -180,6 +180,22 @@ The plugin in [`omarchy/`](omarchy/) is a native widget for the bar of the [Omar
 
 Install the plugin, then add it to your bar:
 
+### Install the plugin
+
+From the marketplace, or from this repository directly:
+
+```bash
+omarchy plugin add https://github.com/mryll/logibar.git --enable
+```
+
+That clones the repository into `~/.config/omarchy/plugins/mryll.logibar` and
+validates the manifest before it is enabled. To remove it later:
+`omarchy plugin remove mryll.logibar`.
+
+The plugin runs `logibar-status` from your PATH and needs the battery daemons, so install those too — from the AUR (`yay -S logibar`) or with `make install-all PREFIX=~/.local`.
+
+For development, link the working copy instead of cloning a second one:
+
 ```bash
 make install-omarchy
 ```
