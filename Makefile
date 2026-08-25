@@ -13,6 +13,7 @@ OMARCHY_PLUGIN_DIR ?= $(HOME)/.config/omarchy/plugins
 test:
 	bash tests/test_status.sh
 	bash tests/test_legacy.sh
+	bash tests/test_hardening.sh
 
 install:
 	$(foreach f,$(WIDGETS) $(DAEMONS),install -Dm755 $(f) $(DESTDIR)$(BINDIR)/$(notdir $(f));)

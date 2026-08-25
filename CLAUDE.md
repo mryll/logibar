@@ -4,6 +4,7 @@
 
 - Install: `make install PREFIX=~/.local` (no build step)
 - Tests: `make test` (or `bash tests/test_status.sh`) — hermetic suite for `logibar-status`: JSON schema, aggregation/thresholds, waybar output, argument errors, and the color chain. It fakes `HOME`/`XDG_CACHE_HOME`/`XDG_RUNTIME_DIR`, so it needs neither the daemons nor a real theme
+- Hardening suite: `bash tests/test_hardening.sh` — the widgets read files they do not own (daemon state, Omarchy theme, pywal cache), so it plants a FIFO, a directory, a character device and a 10 MiB blob at each of those paths and demands exit 0 with valid JSON. Every expected size is **written out by hand** (`65536`, not `$MAX_STATE_BYTES`): a test that reads the constant it checks moves with that constant and can never fail
 - No linter or CI configured; shellcheck is run ad hoc
 
 ## Non-Obvious Rules
