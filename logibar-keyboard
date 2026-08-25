@@ -22,12 +22,19 @@ STATE_FILE="${XDG_RUNTIME_DIR:-/run/user/$UID}/logibar/keyboard"
 #     which is for ever if nobody does
 #   - a multi-gigabyte file is read to the end by sed/jq/read before anyone
 #     gets to look at line 1
-# `-f` closes the first and `head -c` closes the second. Truncation is safe by
-# construction downstream: a half-read state file fails the numeric check
-# below, which already means "hide the widget", never a wrong reading.
+# A path check alone cannot close the first one. A FIFO blocks in open(2), not
+# in read(2), so testing the path and then opening it is a race: between the
+# two, somebody swaps the file for a FIFO. `head` opens without O_NONBLOCK and
+# hangs anyway. `dd iflag=nonblock` is the one coreutils open that does not
+# block, and on a regular file it changes nothing. So `-f` only classifies —
+# it throws out the common bad case cheaply — `iflag=nonblock` is what closes
+# the race, and `bs`/`count` close the second failure mode.
+# Truncation is safe by construction downstream: a half-read state file fails
+# the numeric check below, which already means "hide the widget", never a
+# wrong reading.
 read_bounded() {  # read_bounded PATH MAXBYTES
     [[ -f "$1" ]] || return 1        # -f is false for FIFO, socket, directory and device
-    LC_ALL=C head -c "$2" -- "$1"
+    LC_ALL=C dd if="$1" iflag=nonblock bs="$2" count=1 status=none 2>/dev/null
 }
 
 # A state file is three lines — battery, connected, charging — so 64 KiB is

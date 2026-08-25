@@ -92,6 +92,19 @@ run_helper() {  # run_helper SCRIPT PATH MAXBYTES
     timeout 5 bash -c "$src"$'\n''read_bounded "$1" "$2"' _ "$2" "$3"
 }
 
+# The same helper with its path check cut out. `[[ -f ]]` runs on the PATH and
+# the open that follows runs on whatever that path names BY THEN, so the two
+# are a race: swap the regular file for a FIFO in between and the open is the
+# one that has to survive. A real race cannot be timed reliably from a test, so
+# this reproduces the state the race leaves behind — the open, on a FIFO, with
+# no check in front of it — and asks whether it comes back.
+run_helper_unguarded() {  # run_helper_unguarded SCRIPT PATH MAXBYTES
+    local src
+    src=$(sed -n '/^read_bounded() {/,/^}/p' "$REPO/$1" | grep -v '\[\[ -f')
+    [[ -n "$src" ]] || return 111
+    timeout 5 bash -c "$src"$'\n''read_bounded "$1" "$2"' _ "$2" "$3"
+}
+
 # Evaluate a constant the way bash would, so `$((64 * 1024))` is compared as a
 # number and not as source text.
 const_of() {  # const_of SCRIPT NAME
@@ -122,12 +135,14 @@ mkdir -p "$DIR"
 
 # ── the helper: what it refuses ──────────────────────────────────────────────
 #
-# `-f` is the guard that makes the FIFO cases terminate. Remove it and every
-# case in this block hangs until `timeout` kills it, which is exactly the
-# failure this suite exists to catch.
+# The guard has two halves and they are tested apart. `-f` CLASSIFIES: a FIFO,
+# a symlink to one, a directory and a device node are not regular files, so the
+# helper returns 1 and every caller reads that as "no data". That is this
+# block. `iflag=nonblock` is what makes the open itself SAFE, and the block
+# after this one is the only place that can see it.
 
 for w in "${WIDGETS[@]}"; do
-    check "$w: read_bounded exists" bash -c "sed -n '/^read_bounded() {/,/^}/p' '$REPO/$w' | grep -q 'head -c'"
+    check "$w: read_bounded exists" bash -c "sed -n '/^read_bounded() {/,/^}/p' '$REPO/$w' | grep -q 'iflag=nonblock'"
 
     out=$(run_helper "$w" "$FIFO" 65536); rc=$?
     checkeq "$w: refuses a FIFO (rc)" 1 "$rc"
@@ -147,6 +162,21 @@ for w in "${WIDGETS[@]}"; do
 
     out=$(run_helper "$w" "$SMALL" 65536); rc=$?
     checkeq "$w: passes a small regular file through" "hello" "$out"
+done
+
+# ── the helper: the open cannot block ───────────────────────────────────────
+#
+# The control for the TOCTOU fix, and the only case in this file that `-f`
+# cannot pass on the helper's behalf. `dd iflag=nonblock` opens a FIFO and
+# comes straight back with nothing. `head -c` opens without O_NONBLOCK and
+# waits for a writer that never comes: `timeout` kills it at rc 124, which
+# reads as a FAIL here rather than as a suite that never finishes.
+
+for w in "${WIDGETS[@]}"; do
+    out=$(run_helper_unguarded "$w" "$FIFO" 65536); rc=$?
+    checkeq "$w: opening a FIFO with no path check in front returns (rc)" 0 "$rc"
+    check   "$w: opening a FIFO is not killed by the timeout" test "$rc" -ne 124
+    checkeq "$w: a FIFO nobody writes to yields nothing" "" "$out"
 done
 
 # ── the helper: where it cuts ────────────────────────────────────────────────
@@ -347,7 +377,11 @@ not_in_panel() { ! panel_code | grep -qE "$1"; }
 check "the panel never reloads a watched file" not_in_panel 'reload\(\)'
 check "the panel never reads a watched file's text" not_in_panel '\.text\(\)|\.data\(\)'
 check "the panel does not preload what it watches" grep -q 'preload: false' "$PANEL"
-check "the panel caps what it retains from the CLI" grep -q 'maxBytes: 1024 \* 1024' "$PANEL"
+check "the panel caps what it retains from the CLI" grep -q 'maxChars: 1024 \* 1024' "$PANEL"
+# UTF-16 units, not bytes: a name or a message that says "bytes" or "KiB" is
+# claiming a bound three times tighter than the one the code enforces.
+check "the panel does not call its char tripwire a byte cap" \
+    bash -c "! grep -qE 'maxBytes|KiB' '$PANEL'"
 
 # ── summary ──────────────────────────────────────────────────────────────────
 
