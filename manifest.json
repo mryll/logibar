@@ -49,7 +49,7 @@
         "key": "showMouse",
         "type": "boolean",
         "label": "Show mouse",
-        "description": "PRO X Superlight 2 battery.",
+        "description": "PRO X Superlight battery.",
         "defaultValue": true
       },
       {

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Logitech PRO X Superlight 2 Battery Widget for Waybar
+# Logitech PRO X Superlight Battery Widget for Waybar
 #
 # Usage: logibar-mouse [--color-normal HEX] [--color-warning HEX] [--color-critical HEX]
 #        [--no-color[=all|bar|tooltip]]
@@ -44,7 +44,7 @@ MAX_STATE_BYTES=$((64 * 1024))
 
 ICON="󰍽"
 ICON_CHARGING="󰍽 ⚡"
-TOOLTIP="PRO X Superlight 2"
+TOOLTIP="PRO X Superlight"
 
 # Structured argument errors, escaped by jq so a hostile or multi-line value
 # cannot break out of the JSON (jq is a hard dependency of the output path).

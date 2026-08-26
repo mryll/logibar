@@ -91,7 +91,7 @@ MAX_STATE_BYTES=$((64 * 1024))
 # Device registry — ids, Nerd Font identity glyphs, display names.
 DEVICE_IDS=(keyboard mouse headset)
 declare -A DEVICE_ICON=([keyboard]="󰌌" [mouse]="󰍽" [headset]="󰋎")
-declare -A DEVICE_NAME=([keyboard]="G915 X TKL" [mouse]="PRO X Superlight 2" [headset]="PRO X 2 Headset")
+declare -A DEVICE_NAME=([keyboard]="G915 X TKL" [mouse]="PRO X Superlight" [headset]="PRO X 2 Headset")
 
 # Severity thresholds — single source of truth (mirrored nowhere else).
 WARNING_LEVEL=20
