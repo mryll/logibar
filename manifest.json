@@ -42,7 +42,7 @@
         "key": "showKeyboard",
         "type": "boolean",
         "label": "Show keyboard",
-        "description": "G915 X TKL battery.",
+        "description": "G915 TKL battery.",
         "defaultValue": true
       },
       {

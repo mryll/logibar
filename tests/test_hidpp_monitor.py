@@ -99,5 +99,63 @@ class ReceiverSelectionTests(unittest.TestCase):
                 monitor.hid.device = original_device
 
 
+class BatteryVoltageTests(unittest.TestCase):
+    def test_g915_tkl_uses_battery_voltage(self):
+        self.assertIn((0xC545, 0xC343, "keyboard", 9), monitor.DEVICES)
+        self.assertEqual(
+            monitor.BATTERY_FEATURE_BY_RECEIVER[0xC545],
+            monitor.BATTERY_VOLTAGE_FEATURE,
+        )
+
+    def test_voltage_report_is_converted_to_percentage(self):
+        report = [0x11, 0x01, 0x07, 0x00, 0x0E, 0xF9, 0x00]
+        self.assertEqual(
+            monitor.decode_battery_report(monitor.BATTERY_VOLTAGE_FEATURE, report),
+            (55, False),
+        )
+
+        report[6] = 0x80
+        self.assertEqual(
+            monitor.decode_battery_report(monitor.BATTERY_VOLTAGE_FEATURE, report),
+            (55, True),
+        )
+
+    def test_unified_battery_report_is_unchanged(self):
+        report = [0x11, 0x01, 0x06, 0x10, 0x3C, 0x00, 0x02]
+        self.assertEqual(
+            monitor.decode_battery_report(monitor.UNIFIED_BATTERY_FEATURE, report),
+            (60, True),
+        )
+
+    def test_voltage_query_uses_function_zero(self):
+        class FakeDevice:
+            def __init__(self):
+                self.commands = []
+                self.responses = iter([
+                    [],
+                    [0x11, 0x01, 0x07, 0x10, 0x64, 0x00, 0x00],
+                    [0x11, 0x01, 0x07, 0x00, 0x0E, 0xF9, 0x00],
+                ])
+
+            def write(self, command):
+                self.commands.append(command)
+
+            def read(self, _size, timeout_ms):
+                del timeout_ms
+                return next(self.responses, [])
+
+        device = FakeDevice()
+        self.assertEqual(
+            monitor.query_battery(
+                device,
+                0x01,
+                0x07,
+                monitor.BATTERY_VOLTAGE_FEATURE,
+            ),
+            (55, False),
+        )
+        self.assertEqual(device.commands[0][0:4], [0x11, 0x01, 0x07, 0x00])
+
+
 if __name__ == "__main__":
     unittest.main()
