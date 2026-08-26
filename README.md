@@ -75,6 +75,17 @@ sudo udevadm control --reload-rules && sudo udevadm trigger --action=change --su
 
 ## Installation
 
+### Omarchy
+
+On [Omarchy](https://omarchy.org), the complete installation is two commands:
+
+```bash
+yay -S logibar
+omarchy plugin add https://github.com/mryll/logibar.git --enable
+```
+
+The first command installs the scripts, the udev rule and the two monitor services. The second command installs the bar widget and enables it. Refer to [Omarchy shell plugin](#omarchy-shell-plugin) for the panel and its settings.
+
 ### Arch Linux (AUR)
 
 ```bash
