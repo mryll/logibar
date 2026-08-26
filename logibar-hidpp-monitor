@@ -40,35 +40,46 @@ running = True
 hid_lock = threading.Lock()
 receiver_kind_lock = threading.Lock()
 receiver_kinds = {}
+publish_lock = threading.Lock()
+source_states = {}
+published_states = {}
 
 def signal_handler(sig, frame):
     global running
     running = False
 
-def write_state(name, battery, connected, charging, waybar_signal, state, state_lock):
-    """Atomic write to state file with deduplication."""
+def write_state(name, battery, connected, charging, waybar_signal, state):
+    """Publish the lowest connected source for a logical device."""
     os.makedirs(STATE_DIR, exist_ok=True, mode=0o700)
     state_file = f"{STATE_DIR}/{name}"
-    new_state = f"{battery}\n{1 if connected else 0}\n{1 if charging else 0}"
 
     try:
-        # Check if state changed (with lock for thread safety)
-        with state_lock:
-            last_written = state.get('_last_written_state')
-            if last_written == new_state:
+        with publish_lock:
+            sources = source_states.setdefault(name, {})
+            sources[state['_source_id']] = (battery, connected, charging)
+            connected_sources = [source for source in sources.values() if source[1]]
+            selected = min(connected_sources, key=lambda source: source[0]) if connected_sources else (0, False, False)
+            new_state = f"{selected[0]}\n{1 if selected[1] else 0}\n{1 if selected[2] else 0}"
+            if published_states.get(name) == new_state:
                 return
-            state['_last_written_state'] = new_state
 
-        # Atomic write: write to temp file, then rename
-        fd, tmp_path = tempfile.mkstemp(dir=STATE_DIR)
-        try:
-            os.write(fd, new_state.encode())
-            os.close(fd)
-            os.rename(tmp_path, state_file)
-        except:
-            os.close(fd)
-            os.unlink(tmp_path)
-            raise
+            # Atomic write: write to temp file, then rename
+            fd, tmp_path = tempfile.mkstemp(dir=STATE_DIR)
+            try:
+                os.write(fd, new_state.encode())
+                os.close(fd)
+                os.rename(tmp_path, state_file)
+            except:
+                try:
+                    os.close(fd)
+                except:
+                    pass
+                try:
+                    os.unlink(tmp_path)
+                except:
+                    pass
+                raise
+            published_states[name] = new_state
 
         subprocess.run(["pkill", f"-RTMIN+{waybar_signal}", "waybar"], stderr=subprocess.DEVNULL)
     except:
@@ -195,6 +206,21 @@ def query_battery(dev, device_idx, feat_idx):
         pass
     return None, None
 
+def disconnect_wireless(dev, wireless_pid, name, waybar_signal, state, state_lock):
+    if dev:
+        try:
+            dev.close()
+        except:
+            pass
+    forget_receiver_kinds(wireless_pid)
+    with state_lock:
+        was_connected = state.get('wireless_connected')
+        state['wireless_connected'] = False
+        wired = state.get('wired_connected')
+        if was_connected and not wired:
+            write_state(name, 0, False, False, waybar_signal, state)
+    return None
+
 def monitor_wireless(wireless_pid, name, waybar_signal, state, state_lock):
     device_idx = 0x01
     dev = None
@@ -217,24 +243,13 @@ def monitor_wireless(wireless_pid, name, waybar_signal, state, state_lock):
             devs = safe_enumerate(VID, wireless_pid)
 
             if not devs:
-                if dev:
-                    try:
-                        dev.close()
-                    except:
-                        pass
-                    dev = None
-                forget_receiver_kinds(wireless_pid)
-                with state_lock:
-                    was_connected = state.get('wireless_connected')
-                    state['wireless_connected'] = False
-                    wired = state.get('wired_connected')
-                if was_connected and not wired:
-                    write_state(name, 0, False, False, waybar_signal, state, state_lock)
+                dev = disconnect_wireless(dev, wireless_pid, name, waybar_signal, state, state_lock)
                 time.sleep(0.5)
                 continue
 
             current_path = receiver_path_for_device(wireless_pid, name, devs)
             if current_path is None:
+                dev = disconnect_wireless(dev, wireless_pid, name, waybar_signal, state, state_lock)
                 time.sleep(0.5)
                 continue
 
@@ -257,8 +272,8 @@ def monitor_wireless(wireless_pid, name, waybar_signal, state, state_lock):
                             state['charging'] = charging
                             state['feat_idx'] = feat_idx
                             wired = state.get('wired_connected')
-                        if not wired:
-                            write_state(name, soc, True, charging, waybar_signal, state, state_lock)
+                            if not wired:
+                                write_state(name, soc, True, charging, waybar_signal, state)
 
             with state_lock:
                 wired_just_disconnected = state.get('wired_just_disconnected')
@@ -276,7 +291,7 @@ def monitor_wireless(wireless_pid, name, waybar_signal, state, state_lock):
                             state['battery'] = soc
                             state['charging'] = charging
                             state['feat_idx'] = feat_idx
-                        write_state(name, soc, True, charging, waybar_signal, state, state_lock)
+                            write_state(name, soc, True, charging, waybar_signal, state)
 
             # Blocking read with timeout - true event-driven
             r = dev.read(64, timeout_ms=1000)
@@ -292,8 +307,8 @@ def monitor_wireless(wireless_pid, name, waybar_signal, state, state_lock):
                             was_connected = state.get('wireless_connected')
                             state['wireless_connected'] = False
                             wired = state.get('wired_connected')
-                        if was_connected and not wired:
-                            write_state(name, 0, False, False, waybar_signal, state, state_lock)
+                            if was_connected and not wired:
+                                write_state(name, 0, False, False, waybar_signal, state)
                     else:
                         # Device woke up - query battery
                         time.sleep(0.2)
@@ -307,8 +322,8 @@ def monitor_wireless(wireless_pid, name, waybar_signal, state, state_lock):
                                     state['charging'] = charging
                                     state['feat_idx'] = feat_idx
                                     wired = state.get('wired_connected')
-                                if not wired:
-                                    write_state(name, soc, True, charging, waybar_signal, state, state_lock)
+                                    if not wired:
+                                        write_state(name, soc, True, charging, waybar_signal, state)
 
                 # Battery broadcast event (long HID++ 0x11)
                 else:
@@ -327,23 +342,11 @@ def monitor_wireless(wireless_pid, name, waybar_signal, state, state_lock):
                                     state['charging'] = charging
                                     state['wireless_connected'] = True
                                     wired = state.get('wired_connected')
-                                if (soc != old_battery or charging != old_charging) and not wired:
-                                    write_state(name, soc, True, charging, waybar_signal, state, state_lock)
+                                    if (soc != old_battery or charging != old_charging) and not wired:
+                                        write_state(name, soc, True, charging, waybar_signal, state)
 
         except Exception:
-            if dev:
-                try:
-                    dev.close()
-                except:
-                    pass
-                dev = None
-            forget_receiver_kinds(wireless_pid)
-            with state_lock:
-                was_connected = state.get('wireless_connected')
-                state['wireless_connected'] = False
-                wired = state.get('wired_connected')
-            if was_connected and not wired:
-                write_state(name, 0, False, False, waybar_signal, state, state_lock)
+            dev = disconnect_wireless(dev, wireless_pid, name, waybar_signal, state, state_lock)
             time.sleep(0.5)
 
 def monitor_wired(wired_pid, name, waybar_signal, state, state_lock):
@@ -366,8 +369,8 @@ def monitor_wired(wired_pid, name, waybar_signal, state, state_lock):
                     state['wired_connected'] = False
                     state['wired_just_disconnected'] = True
                     wireless = state.get('wireless_connected')
-                if was_connected and not wireless:
-                    write_state(name, 0, False, False, waybar_signal, state, state_lock)
+                    if was_connected and not wireless:
+                        write_state(name, 0, False, False, waybar_signal, state)
                 time.sleep(0.5)
                 continue
 
@@ -385,7 +388,7 @@ def monitor_wired(wired_pid, name, waybar_signal, state, state_lock):
                             state['battery'] = soc
                             state['charging'] = charging
                             state['wired_feat_idx'] = feat_idx
-                        write_state(name, soc, True, charging, waybar_signal, state, state_lock)
+                            write_state(name, soc, True, charging, waybar_signal, state)
 
             # Blocking read with timeout - true event-driven
             with state_lock:
@@ -404,8 +407,8 @@ def monitor_wired(wired_pid, name, waybar_signal, state, state_lock):
                             old_charging = state.get('charging')
                             state['battery'] = soc
                             state['charging'] = charging
-                        if soc != old_battery or charging != old_charging:
-                            write_state(name, soc, True, charging, waybar_signal, state, state_lock)
+                            if soc != old_battery or charging != old_charging:
+                                write_state(name, soc, True, charging, waybar_signal, state)
             else:
                 time.sleep(1)
 
@@ -421,12 +424,13 @@ def monitor_wired(wired_pid, name, waybar_signal, state, state_lock):
                 state['wired_connected'] = False
                 state['wired_just_disconnected'] = True
                 wireless = state.get('wireless_connected')
-            if was_connected and not wireless:
-                write_state(name, 0, False, False, waybar_signal, state, state_lock)
+                if was_connected and not wireless:
+                    write_state(name, 0, False, False, waybar_signal, state)
             time.sleep(0.5)
 
 def monitor_device(wireless_pid, wired_pid, name, waybar_signal):
     state = {
+        '_source_id': (wireless_pid, wired_pid),
         'wireless_connected': False,
         'wired_connected': False,
         'wired_just_disconnected': False,
@@ -434,7 +438,6 @@ def monitor_device(wireless_pid, wired_pid, name, waybar_signal):
         'charging': None,
         'feat_idx': None,
         'wired_feat_idx': None,
-        '_last_written_state': None,
     }
     state_lock = threading.Lock()
 
