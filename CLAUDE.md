@@ -20,3 +20,10 @@
 - Daemons notify Waybar via `pkill -RTMIN+N waybar` — signal numbers are hardcoded per device and must match waybar config
 - State files are 3 lines: `battery\nconnected\ncharging` in `$XDG_RUNTIME_DIR/logibar/`
 - Python dependency is the Cython hidapi binding (`import hid` with `hid.device`), packaged as `python-hidapi` on Arch / `hidapi` on pip — NOT `python-hid`/`hid`, an incompatible binding that claims the same module name and makes the daemons fail silently
+
+## Release
+
+1. Commit `chore: release X.Y.Z` on `develop` bumping the `manifest.json` version (the script carries no version string; the tag and the manifest ARE the version), push.
+2. Move master to the release — master only advances here: `git push origin develop:master`. Then `git tag vX.Y.Z && git push origin --tags`.
+3. `gh release create vX.Y.Z` (bash widget: source-only release, nothing to build).
+4. Only then bump the AUR package (`logibar`) per the workspace `AGENTS.md` (`~/Work/personal/AGENTS.md`).
