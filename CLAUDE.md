@@ -9,7 +9,8 @@
 
 ## Non-Obvious Rules
 
-- **Quickshell emits NEITHER `started` NOR `exited` when the command does not exist** — `running` just drops back to false. That is the only signal a failed start gives. Anything that waits on `onExited` to leave a loading state hangs for ever when the CLI is not installed, which is the first run of everyone who installs the plugin from the marketplace: the plugin is a git clone, the CLI is a package, and nothing installs the second for you. The `onRunningChanged` guard in the panel's `Process` is what makes the not-installed message reachable — verified against a running shell, not assumed.
+- **Quickshell emits NEITHER `started` NOR `exited` when the command does not exist** — `running` just drops back to false. `sawExit` is the discriminator: no `exited` = the run could not start; an `exited` run with empty output is an operational failure, never "not installed".
+- **`installCmd` is the one constant** — the message shows it and the button copies it (`Util.execArgv(["wl-copy", ...])`, no shell line, no trailing newline). The button gates on `notInstalled`, never on error text. Pinned in `test_copy_button.sh`.
 
 - **A tooltip meter is PARKED, not rendered in place.** The bar has to reach the tooltip's right edge, and that edge is the widest TEXT line — which does not exist yet while the lines are being collected. So a meter pushes `METER:<i>` into `lines` plus one entry in the parallel `meter_*` arrays, and the width pass resolves it. The width pass MUST skip `METER:` lines, or the measurement is circular. Every meter in one tooltip gets the SAME bar length: they stack, so a reader compares them against each other.
 
@@ -23,7 +24,7 @@
 
 ## Release
 
-1. Commit `chore: release X.Y.Z` on `develop` bumping the `manifest.json` version (the script carries no version string; the tag and the manifest ARE the version), push.
-2. Move master to the release — master only advances here: `git push origin develop:master`. Then `git tag vX.Y.Z && git push origin --tags`.
+1. Merge the work into `master`. In the release commit (`chore: release X.Y.Z`): bump the `manifest.json` version (the script carries no version string; the tag and the manifest ARE the version). Push.
+2. `git tag vX.Y.Z && git push origin --tags`.
 3. `gh release create vX.Y.Z` (bash widget: source-only release, nothing to build).
 4. Only then bump the AUR package (`logibar`) per the workspace `AGENTS.md` (`~/Work/personal/AGENTS.md`).
