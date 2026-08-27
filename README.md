@@ -41,6 +41,7 @@ The same core drives both frontends, so a number reads the same on either one:
 | Device | Type | Daemon |
 |---|---|---|
 | G915 X TKL | Keyboard | `logibar-hidpp-monitor` |
+| PRO X Superlight | Mouse | `logibar-hidpp-monitor` |
 | PRO X Superlight 2 | Mouse | `logibar-hidpp-monitor` |
 | PRO X 2 LIGHTSPEED | Headset | `logibar-headset-monitor` |
 
@@ -474,6 +475,7 @@ To add another Logitech device to the keyboard and mouse daemon:
    ```python
    DEVICES = [
        (0xc547, 0xc357, "keyboard", 9),   # G915 X TKL
+       (0xc547, 0xc094, "mouse", 10),     # PRO X Superlight
        (0xc54d, 0xc09b, "mouse", 10),     # PRO X Superlight 2
        (0xNEW1, 0xNEW2, "newdevice", 11), # Your device
    ]

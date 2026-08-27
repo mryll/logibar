@@ -1,6 +1,7 @@
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 SYSTEMD_DIR ?= $(HOME)/.config/systemd/user
+PYTHON ?= python3
 
 WIDGETS = logibar-status logibar-keyboard logibar-mouse logibar-headset
 DAEMONS = logibar-hidpp-monitor logibar-headset-monitor
@@ -11,6 +12,7 @@ UDEV_DIR ?= /etc/udev/rules.d
 OMARCHY_PLUGIN_DIR ?= $(HOME)/.config/omarchy/plugins
 
 test:
+	$(PYTHON) tests/test_hidpp_monitor.py
 	bash tests/test_status.sh
 	bash tests/test_legacy.sh
 	bash tests/test_hardening.sh
