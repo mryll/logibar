@@ -66,7 +66,7 @@ CLI_COLOR_NORMAL=""
 CLI_COLOR_WARNING=""
 CLI_COLOR_CRITICAL=""
 FRAME=false
-FRAME_FONT="JetBrainsMono Nerd Font Mono"
+FRAME_FONT="JetBrainsMono Nerd Font, JetBrainsMono Nerd Font Mono, monospace"
 PLAIN_SURFACES=""   # "" | all | bar | tooltip
 _nc=""
 while [[ $# -gt 0 ]]; do

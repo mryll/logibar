@@ -161,7 +161,7 @@ CLI_COLOR_CRITICAL=""
 # siguiente si la anterior no está instalada. El paquete de Arch
 # ttf-jetbrains-mono-nerd NO provee la familia "…Mono", así que fijar solo
 # ese nombre caía en la proporcional del sistema sin decir nada.
-TOOLTIP_FONT="JetBrainsMono Nerd Font Mono, JetBrainsMono Nerd Font, monospace"
+TOOLTIP_FONT="JetBrainsMono Nerd Font, JetBrainsMono Nerd Font Mono, monospace"
 WATCH=false
 PLAIN_SURFACES=""   # "" | all | bar | tooltip — which surfaces drop color
 _nc=""
