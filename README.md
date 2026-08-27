@@ -430,14 +430,16 @@ Request:  [0x10, device_idx, 0x00, 0x0d, 0x10, 0x04, 0x00]
                   └──────────── 0x01 for wireless (via receiver), 0xFF for wired (direct USB)
 Response: [0x10, device_idx, 0x00, 0x0d, feature_index, ...]
 
-Request:  [0x11, device_idx, feature_index, 0x10, 0x00, ..., 0x00]
-Response: [0x11, device_idx, feature_index, 0x10, SoC, level, status, ...]
+Request:  [0x11, device_idx, feature_index, 0x1d, 0x00, ..., 0x00]
+Response: [0x11, device_idx, feature_index, 0x1d, SoC, level, status, ...]
                                                    │     │      └── 1=charging, 2=slow, 3=full
                                                    │     └── level flags
                                                    └── State of Charge (0-100%)
 ```
 
-The G915 TKL instead exposes BATTERY_VOLTAGE (`0x1001`). Its response contains a two-byte millivolt reading and charging flags. Logibar converts that voltage to a percentage using the same discharge curve as Solaar.
+Byte 3 of a request is `(function << 4) | software_id`. hidraw copies every response to every open descriptor on a node, so each requester in the daemon signs with its own software ID (`0xD` for the battery monitors, `0xE` for the device-kind probe) and accepts only a response with its full echo. Broadcast events carry software ID `0`.
+
+The G915 TKL instead exposes BATTERY_VOLTAGE (`0x1001`). Its query is function 0 (request byte `0x0d`), and the response contains a two-byte millivolt reading and charging flags. Logibar converts that voltage to a percentage using the same discharge curve as Solaar. A drained cell converts to `0%`, which the widgets show as a critical reading — only `connected` decides visibility.
 
 After the first request, the daemon blocks on the device with a timeout of one second. The receiver sends a message after each change of the state:
 

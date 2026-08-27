@@ -259,7 +259,11 @@ read_devices() {
         { IFS= read -r battery; IFS= read -r connected; IFS= read -r charging; } <<< "$blob"
         UPDATED[$id]=$(date -Iseconds -d "@$(stat -c %Y "$file" 2>/dev/null || echo 0)" 2>/dev/null)
         [[ "$battery" =~ ^[0-9]+$ ]] || continue
-        if [[ "$connected" != "1" ]] || [[ "$battery" -eq 0 ]]; then
+        # `connected` is the only connection flag. A battery of 0 with the
+        # device connected is a real reading (the G915 TKL reports voltage,
+        # and a drained cell converts to 0%) — hiding it would silence the
+        # alarm at the exact moment it matters most.
+        if [[ "$connected" != "1" ]]; then
             continue
         fi
         (( battery > 100 )) && battery=100
