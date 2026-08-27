@@ -333,6 +333,26 @@ Panel {
   property int exitCode: 0
   property var pendingCmd: null
 
+  // True when onExited fired for the current run. A missing command emits
+  // no exited. This separates "could not start" from "ran, no output".
+  property bool sawExit: false
+
+  // True only when the run could not START. Gates the copy button.
+  // Operational errors never set it.
+  property bool notInstalled: false
+
+  // One constant, two users: the error message shows it and the copy
+  // button copies it.
+  readonly property string installCmd: "yay -S logibar"
+
+  // The copy button shows a check for a moment.
+  property bool installCopied: false
+  Timer {
+    id: copiedReset
+    interval: 1500
+    onTriggered: root.installCopied = false
+  }
+
   // The shell's base handler covers open/close/show/hide/toggle; this one adds
   // `refresh` so a keybind or a script can force a fetch without opening the
   // panel. Overriding means restating the five, so `manageIpc: false` above
@@ -366,6 +386,8 @@ Panel {
     collectorDone = false
     processDone = false
     capturedText = ""
+    sawExit = false
+    exitCode = 0
     statusProc.command = cmd
     statusProc.running = true
   }
@@ -379,19 +401,23 @@ Panel {
   function setError(message) { loadError = String(message) }
 
   function finalizeRun() {
+    notInstalled = false
     var text = capturedText.trim()
     if (text === "") {
-      // The install hint lives HERE and not in the core, which is where every
-      // other message of this family lives. The one message the core cannot
-      // emit is the one about its own absence.
-      //
-      // Only if nothing has explained it already. The StdioCollector tripwire
-      // below also leaves capturedText empty, and there "not installed" is a
-      // lie: the binary answered, it answered too much.
-      if (root.loadError === "")
-        setError(binName + " produced no output — not installed or not on PATH?\n\n"
-                 + "Install it with:  yay -S logibar\n"
+      // Empty output has three causes. (1) The tripwire already set an
+      // error: keep it. (2) No exited = failed start: report not-installed.
+      // (3) The process ran and printed nothing: an operational error,
+      // never "not installed".
+      if (root.loadError !== "") {
+        // Already explained (tripwire).
+      } else if (!sawExit) {
+        notInstalled = true
+        setError(binName + " could not start — not installed or not on PATH?\n\n"
+                 + "Install it with:  " + installCmd + "\n"
                  + "Then open this panel again.")
+      } else {
+        setError(binName + " produced no output (exit " + exitCode + ")")
+      }
     } else {
       handle(text)
     }
@@ -472,6 +498,7 @@ Panel {
       root.maybeFinalize()
     }
     onExited: function(code) {
+      root.sawExit = true
       root.exitCode = code
       root.processDone = true
       exitFallback.restart()   // failed-start case: collector may never fire
@@ -626,6 +653,25 @@ Panel {
             font.pixelSize: Style.font.body
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.WordWrap
+          }
+
+          // Copies installCmd as one argv element: no shell line, no
+          // trailing newline. Gated on notInstalled, never on error text.
+          PanelActionButton {
+            visible: root.notInstalled
+            anchors.horizontalCenter: parent.horizontalCenter
+            iconText: root.installCopied ? "󰄬" : "󰆏"
+            tooltipText: root.installCopied ? "Copied" : "Copy install command"
+            foreground: root.dim
+            hoverColor: root.foreground
+            fontFamily: root.fontFamily
+            fontSize: Style.font.caption
+            size: Style.space(20)
+            onClicked: {
+              Util.execArgv(["wl-copy", root.installCmd])
+              root.installCopied = true
+              copiedReset.restart()
+            }
           }
 
           // ---------- Devices ----------
