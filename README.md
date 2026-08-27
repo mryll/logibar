@@ -40,6 +40,7 @@ The same core drives both frontends, so a number reads the same on either one:
 
 | Device | Type | Daemon |
 |---|---|---|
+| G915 TKL | Keyboard | `logibar-hidpp-monitor` |
 | G915 X TKL | Keyboard | `logibar-hidpp-monitor` |
 | PRO X Superlight | Mouse | `logibar-hidpp-monitor` |
 | PRO X Superlight 2 | Mouse | `logibar-hidpp-monitor` |
@@ -365,7 +366,7 @@ Change `padding` and `margin` in `~/.config/waybar/style.css`:
 {
   "schema_version": 1,
   "devices": [
-    { "id": "keyboard", "name": "G915 X TKL", "battery": 92, "connected": true,
+    { "id": "keyboard", "name": "G915 TKL", "battery": 92, "connected": true,
       "charging": true, "state": "ok", "updated_at": "2026-08-20T02:21:04-03:00" }
   ],
   "aggregate": { "worst_battery": 8, "any_charging": true, "connected_count": 3, "state": "critical" },
@@ -419,7 +420,7 @@ An error is also a JSON document, with an `error` field and the same exit code 0
 
 Each device has two product IDs: one for the Lightspeed receiver and one for the USB cable. One thread monitors each product ID, and a shared state selects the live connection. The cable has priority.
 
-To read a battery, the daemon asks the ROOT feature at index `0x00` for the index of the UNIFIED_BATTERY feature (`0x1004`). Then it asks that feature for the charge:
+To read most batteries, the daemon asks the ROOT feature at index `0x00` for the index of the UNIFIED_BATTERY feature (`0x1004`). Then it asks that feature for the charge:
 
 ```
 Request:  [0x10, device_idx, 0x00, 0x0d, 0x10, 0x04, 0x00]
@@ -429,12 +430,16 @@ Request:  [0x10, device_idx, 0x00, 0x0d, 0x10, 0x04, 0x00]
                   └──────────── 0x01 for wireless (via receiver), 0xFF for wired (direct USB)
 Response: [0x10, device_idx, 0x00, 0x0d, feature_index, ...]
 
-Request:  [0x11, device_idx, feature_index, 0x10, 0x00, ..., 0x00]
-Response: [0x11, device_idx, feature_index, 0x10, SoC, level, status, ...]
+Request:  [0x11, device_idx, feature_index, 0x1d, 0x00, ..., 0x00]
+Response: [0x11, device_idx, feature_index, 0x1d, SoC, level, status, ...]
                                                    │     │      └── 1=charging, 2=slow, 3=full
                                                    │     └── level flags
                                                    └── State of Charge (0-100%)
 ```
+
+Byte 3 of a request is `(function << 4) | software_id`. hidraw copies every response to every open descriptor on a node, so each requester in the daemon signs with its own software ID (`0xD` for the battery monitors, `0xE` for the device-kind probe) and accepts only a response with its full echo. Broadcast events carry software ID `0`.
+
+The G915 TKL instead exposes BATTERY_VOLTAGE (`0x1001`). Its query is function 0 (request byte `0x0d`), and the response contains a two-byte millivolt reading and charging flags. Logibar converts that voltage to a percentage using the same discharge curve as Solaar. A drained cell converts to `0%`, which the widgets show as a critical reading — only `connected` decides visibility.
 
 After the first request, the daemon blocks on the device with a timeout of one second. The receiver sends a message after each change of the state:
 
@@ -474,12 +479,15 @@ To add another Logitech device to the keyboard and mouse daemon:
 
    ```python
    DEVICES = [
+       (0xc545, 0xc343, "keyboard", 9),   # G915 TKL
        (0xc547, 0xc357, "keyboard", 9),   # G915 X TKL
        (0xc547, 0xc094, "mouse", 10),     # PRO X Superlight
        (0xc54d, 0xc09b, "mouse", 10),     # PRO X Superlight 2
        (0xNEW1, 0xNEW2, "newdevice", 11), # Your device
    ]
    ```
+
+   Devices use UNIFIED_BATTERY (`0x1004`) by default. If the device instead exposes BATTERY_VOLTAGE (`0x1001`), add its receiver PID to `BATTERY_FEATURE_BY_RECEIVER`.
 
 3. Add the device to `DEVICE_IDS`, `DEVICE_ICON` and `DEVICE_NAME` in `logibar-status`.
 

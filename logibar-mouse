@@ -175,7 +175,9 @@ fi
 BATTERY=""; CONNECTED=""; CHARGING=""
 { IFS= read -r BATTERY; IFS= read -r CONNECTED; IFS= read -r CHARGING; } <<< "$_state"
 
-if [[ -z "$BATTERY" ]] || [[ "$BATTERY" == "0" ]] || [[ "$CONNECTED" != "1" ]]; then
+# CONNECTED is the only connection flag: a 0% battery on a connected device
+# is a real critical reading, not an absent device.
+if [[ -z "$BATTERY" ]] || [[ "$CONNECTED" != "1" ]]; then
     echo '{"text": ""}'
     exit 0
 fi

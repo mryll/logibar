@@ -1,5 +1,5 @@
 #!/bin/bash
-# Logitech G915 X TKL Battery Widget for Waybar
+# Logitech G915 TKL Battery Widget for Waybar
 #
 # Usage: logibar-keyboard [--color-normal HEX] [--color-warning HEX] [--color-critical HEX]
 #        [--no-color[=all|bar|tooltip]]
@@ -44,7 +44,7 @@ MAX_STATE_BYTES=$((64 * 1024))
 
 ICON="󰌌"
 ICON_CHARGING="󰌌 ⚡"
-TOOLTIP="G915 X TKL"
+TOOLTIP="G915 TKL"
 
 # Structured argument errors, escaped by jq so a hostile or multi-line value
 # cannot break out of the JSON (jq is a hard dependency of the output path).
@@ -175,7 +175,9 @@ fi
 BATTERY=""; CONNECTED=""; CHARGING=""
 { IFS= read -r BATTERY; IFS= read -r CONNECTED; IFS= read -r CHARGING; } <<< "$_state"
 
-if [[ -z "$BATTERY" ]] || [[ "$BATTERY" == "0" ]] || [[ "$CONNECTED" != "1" ]]; then
+# CONNECTED is the only connection flag: a 0% battery on a connected device
+# is a real critical reading, not an absent device.
+if [[ -z "$BATTERY" ]] || [[ "$CONNECTED" != "1" ]]; then
     echo '{"text": ""}'
     exit 0
 fi

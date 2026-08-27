@@ -119,6 +119,15 @@ clear_states
 set_state keyboard 10 1 0
 check "10% is critical (inclusive)" \
     jq -e '.aggregate.state == "critical"' <<< "$(run_status --json)"
+clear_states
+set_state keyboard 0 1 0
+out=$(run_status --json)
+check "a connected 0% battery stays visible" \
+    jq -e '.devices[] | select(.id == "keyboard") | .connected == true and .battery == 0' <<< "$out"
+check "a connected 0% battery is critical" \
+    jq -e '.devices[] | select(.id == "keyboard") | .state == "critical"' <<< "$out"
+check "a connected 0% wins the aggregate" \
+    jq -e '.aggregate.worst_battery == 0 and .aggregate.state == "critical"' <<< "$out"
 
 # ── disconnected / absent devices ────────────────────────────────────────────
 

@@ -79,6 +79,12 @@ set_state keyboard 15 1 0
 check "warning class in 11-20%" jq -e '.class == "warning"' <<< "$(run_widget logibar-keyboard)"
 set_state keyboard 55 1 1
 check "charging shows the charging icon" jq -e '.text | test("⚡")' <<< "$(run_widget logibar-keyboard)"
+for i in 0 1 2; do
+    set_state "${DEVICES[$i]}" 0 1 0
+    check "${WIDGETS[$i]}: a connected 0% battery shows as critical" \
+        jq -e '(.text | test("0%")) and .class == "critical"' <<< "$(run_widget "${WIDGETS[$i]}")"
+    set_state "${DEVICES[$i]}" 77 1 0
+done
 set_state keyboard 0 0 0
 checkeq "disconnected hides the module" '' "$(run_widget logibar-keyboard | jq -r .text)"
 rm -f "$TMP/run/logibar/keyboard"

@@ -326,7 +326,8 @@ class SoftwareIdTests(unittest.TestCase):
         self.assertEqual(device.commands[0][3], 0x0d)
 
         self.assertEqual(
-            monitor.query_battery(device, 0x01, feat_idx), (60, True)
+            monitor.query_battery(device, 0x01, feat_idx, monitor.UNIFIED_BATTERY_FEATURE),
+            (60, True),
         )
         self.assertEqual(device.commands[1][0:4], [0x11, 0x01, 0x06, 0x1d])
 
@@ -383,11 +384,15 @@ class SoftwareIdTests(unittest.TestCase):
         lock = threading.Lock()
         try:
             echo = [0x11, 0x01, 0x06, 0x1d, 0x37, 0x00, 0x01]
-            monitor.handle_battery_broadcast(echo, 0x01, "mouse", 10, state, lock)
+            monitor.handle_battery_broadcast(
+                echo, 0x01, "mouse", 10, monitor.UNIFIED_BATTERY_FEATURE, state, lock
+            )
             self.assertEqual(writes, [])
 
             event = [0x11, 0x01, 0x06, 0x00, 0x37, 0x00, 0x01]
-            monitor.handle_battery_broadcast(event, 0x01, "mouse", 10, state, lock)
+            monitor.handle_battery_broadcast(
+                event, 0x01, "mouse", 10, monitor.UNIFIED_BATTERY_FEATURE, state, lock
+            )
             self.assertEqual(writes[0][0:5], ("mouse", 0x37, True, True, 10))
         finally:
             monitor.write_state = original_write_state
@@ -514,6 +519,64 @@ class StateAggregationTests(unittest.TestCase):
             monitor.subprocess.run = original_run
             monitor.source_states.clear()
             monitor.published_states.clear()
+
+
+class BatteryVoltageTests(unittest.TestCase):
+    def test_g915_tkl_uses_battery_voltage(self):
+        self.assertIn((0xC545, 0xC343, "keyboard", 9), monitor.DEVICES)
+        self.assertEqual(
+            monitor.BATTERY_FEATURE_BY_RECEIVER[0xC545],
+            monitor.BATTERY_VOLTAGE_FEATURE,
+        )
+
+    def test_voltage_report_is_converted_to_percentage(self):
+        report = [0x11, 0x01, 0x07, 0x00, 0x0E, 0xF9, 0x00]
+        self.assertEqual(
+            monitor.decode_battery_report(monitor.BATTERY_VOLTAGE_FEATURE, report),
+            (55, False),
+        )
+
+        report[6] = 0x80
+        self.assertEqual(
+            monitor.decode_battery_report(monitor.BATTERY_VOLTAGE_FEATURE, report),
+            (55, True),
+        )
+
+    def test_unified_battery_report_is_unchanged(self):
+        report = [0x11, 0x01, 0x06, 0x10, 0x3C, 0x00, 0x02]
+        self.assertEqual(
+            monitor.decode_battery_report(monitor.UNIFIED_BATTERY_FEATURE, report),
+            (60, True),
+        )
+
+    def test_voltage_query_uses_function_zero_with_the_monitor_id(self):
+        class FakeDevice:
+            def __init__(self):
+                self.commands = []
+                self.responses = iter([
+                    [],
+                    [0x11, 0x01, 0x07, 0x1d, 0x64, 0x00, 0x00],
+                    [0x11, 0x01, 0x07, 0x0d, 0x0E, 0xF9, 0x00],
+                ])
+
+            def write(self, command):
+                self.commands.append(command)
+
+            def read(self, _size, timeout_ms):
+                del timeout_ms
+                return next(self.responses, [])
+
+        device = FakeDevice()
+        self.assertEqual(
+            monitor.query_battery(
+                device,
+                0x01,
+                0x07,
+                monitor.BATTERY_VOLTAGE_FEATURE,
+            ),
+            (55, False),
+        )
+        self.assertEqual(device.commands[0][0:4], [0x11, 0x01, 0x07, 0x0d])
 
 
 if __name__ == "__main__":
