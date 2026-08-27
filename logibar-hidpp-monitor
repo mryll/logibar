@@ -174,21 +174,29 @@ def get_device_kind(path):
 def receiver_path_for_device(wireless_pid, name, devs):
     if wireless_pid not in SHARED_RECEIVER_PIDS:
         return devs[0]['path']
+    forget_receiver_kinds(wireless_pid, devs)
     with receiver_kind_lock:
         for path in dict.fromkeys(d['path'] for d in devs):
-            kind = receiver_kinds.get(path)
+            cached = receiver_kinds.get(path)
+            kind = cached[1] if cached and cached[0] == wireless_pid else None
             if kind is None:
                 kind = get_device_kind(path)
                 if kind is not None:
-                    receiver_kinds[path] = kind
+                    receiver_kinds[path] = (wireless_pid, kind)
             if kind == DEVICE_KIND[name]:
                 return path
     return None
 
-def forget_receiver_kinds(wireless_pid):
+def forget_receiver_kinds(wireless_pid, devs):
     if wireless_pid in SHARED_RECEIVER_PIDS:
+        active_paths = {device['path'] for device in devs}
         with receiver_kind_lock:
-            receiver_kinds.clear()
+            stale_paths = [
+                path for path, (pid, _) in receiver_kinds.items()
+                if pid == wireless_pid and path not in active_paths
+            ]
+            for path in stale_paths:
+                del receiver_kinds[path]
 
 def query_battery(dev, device_idx, feat_idx):
     try:
@@ -212,7 +220,6 @@ def disconnect_wireless(dev, wireless_pid, name, waybar_signal, state, state_loc
             dev.close()
         except:
             pass
-    forget_receiver_kinds(wireless_pid)
     with state_lock:
         was_connected = state.get('wireless_connected')
         state['wireless_connected'] = False
@@ -243,6 +250,7 @@ def monitor_wireless(wireless_pid, name, waybar_signal, state, state_lock):
             devs = safe_enumerate(VID, wireless_pid)
 
             if not devs:
+                forget_receiver_kinds(wireless_pid, devs)
                 dev = disconnect_wireless(dev, wireless_pid, name, waybar_signal, state, state_lock)
                 time.sleep(0.5)
                 continue

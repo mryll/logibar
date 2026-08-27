@@ -53,6 +53,24 @@ class ReceiverSelectionTests(unittest.TestCase):
             monitor.receiver_path_for_device(0xC547, "mouse", devices)
         )
 
+    def test_absent_shared_device_keeps_present_receiver_cached(self):
+        calls = []
+        monitor.get_device_kind = lambda path: calls.append(path) or 0x00
+        devices = [{"path": b"/dev/keyboard"}]
+
+        self.assertEqual(
+            monitor.receiver_path_for_device(0xC547, "keyboard", devices),
+            b"/dev/keyboard",
+        )
+        self.assertIsNone(
+            monitor.receiver_path_for_device(0xC547, "mouse", devices)
+        )
+        self.assertEqual(
+            monitor.receiver_path_for_device(0xC547, "keyboard", devices),
+            b"/dev/keyboard",
+        )
+        self.assertEqual(calls, [b"/dev/keyboard"])
+
     def test_unique_pid_uses_its_first_hidpp_path(self):
         monitor.get_device_kind = lambda _path: self.fail("unexpected kind probe")
         devices = [{"path": b"/dev/superlight2"}]
