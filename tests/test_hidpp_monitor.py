@@ -23,6 +23,27 @@ if _original_hid is None:
 else:
     sys.modules["hid"] = _original_hid
 
+sys.path.insert(0, str(Path(__file__).parent))
+from fake_hid import (  # noqa: E402
+    BATTERY_VOLTAGE_FEATURE,
+    DaemonHarness,
+    FakeHidBus,
+    FakeNode,
+    FakePairedDevice,
+    UNIFIED_BATTERY_FEATURE,
+)
+
+
+def is_root_lookup(cmd):
+    return cmd[0] == 0x10 and cmd[2] == 0x00
+
+
+def single_device_bus(pid, sheet, path=b"/dev/receiver", **node_kwargs):
+    bus = FakeHidBus([FakeNode(path, pid, sheet, **node_kwargs)])
+    fd = bus.device()
+    fd.open_path(path)
+    return bus, fd
+
 
 def clear_probe_state():
     monitor.receiver_kinds.clear()
@@ -209,42 +230,21 @@ class ReceiverSelectionTests(unittest.TestCase):
         self.assertNotIn(b"/dev/old", monitor.receiver_kinds)
 
     def test_kind_probe_ignores_other_hidpp_responses(self):
-        class FakeDevice:
-            def __init__(self):
-                self.responses = iter([
-                    [],
-                    [],
-                    [0x11, 0x01, 0x00, 0x1e, 0x00],
-                    [0x11, 0x01, 0x00, 0x0e, 0x03],
-                    [],
-                    [0x11, 0x01, 0x03, 0x1e, 0x00],
-                    [0x11, 0x01, 0x03, 0x2e, 0x03],
-                    [],
-                    [0x11, 0x01, 0x03, 0x2e, 0x03],
-                ])
+        bus, _fd = single_device_bus(
+            0xC547, FakePairedDevice(kind=0x03, battery=50))
+        bus.intercept_next(
+            b"/dev/receiver", is_root_lookup,
+            lambda _req, resp: [[0x11, 0x01, 0x00, 0x1e, 0x00], resp])
+        bus.intercept_next(
+            b"/dev/receiver", lambda cmd: cmd[0] == 0x11 and cmd[2] == 0x03,
+            lambda _req, resp: [[0x11, 0x01, 0x03, 0x1e, 0x00], resp])
 
-            def open_path(self, _path):
-                pass
-
-            def write(self, _command):
-                pass
-
-            def read(self, _size, timeout_ms):
-                del timeout_ms
-                return next(self.responses, [])
-
-            def close(self):
-                pass
-
-        original_device = getattr(monitor.hid, "device", None)
-        monitor.hid.device = FakeDevice
+        original_hid = monitor.hid
+        monitor.hid = bus.namespace()
         try:
             self.assertEqual(monitor.get_device_kind(b"/dev/receiver"), 0x03)
         finally:
-            if original_device is None:
-                del monitor.hid.device
-            else:
-                monitor.hid.device = original_device
+            monitor.hid = original_hid
 
     def test_disconnect_closes_stale_shared_receiver(self):
         class FakeDevice:
@@ -282,95 +282,48 @@ class ReceiverSelectionTests(unittest.TestCase):
 
 class SoftwareIdTests(unittest.TestCase):
     def test_a_response_with_a_foreign_software_id_is_ignored(self):
-        class FakeDevice:
-            def __init__(self):
-                self.responses = iter([
-                    [],
-                    [0x11, 0x01, 0x00, 0x0e, 0x05],
-                    [0x11, 0x01, 0x00, 0x0d, 0x06],
-                ])
-
-            def write(self, _command):
-                pass
-
-            def read(self, _size, timeout_ms):
-                del timeout_ms
-                return next(self.responses, [])
+        bus, fd = single_device_bus(
+            0xC54D, FakePairedDevice(kind=0x03, battery=50))
+        bus.intercept_next(
+            b"/dev/receiver", is_root_lookup,
+            lambda _req, resp: [[0x11, 0x01, 0x00, 0x0e, 0x05], resp])
 
         self.assertEqual(
-            monitor.get_feature_index(FakeDevice(), 0x01, 0x1004, retries=1),
+            monitor.get_feature_index(fd, 0x01, 0x1004, retries=1),
             0x06,
         )
 
     def test_monitor_requests_carry_the_monitor_software_id(self):
-        class FakeDevice:
-            def __init__(self):
-                self.commands = []
-                self.responses = iter([
-                    [],
-                    [0x11, 0x01, 0x00, 0x0d, 0x06],
-                    [],
-                    [0x11, 0x01, 0x06, 0x1d, 0x3C, 0x00, 0x01],
-                ])
+        bus, fd = single_device_bus(
+            0xC54D, FakePairedDevice(kind=0x03, battery=60, charging=True))
 
-            def write(self, command):
-                self.commands.append(command)
-
-            def read(self, _size, timeout_ms):
-                del timeout_ms
-                return next(self.responses, [])
-
-        device = FakeDevice()
-        feat_idx = monitor.get_feature_index(device, 0x01, 0x1004, retries=1)
+        feat_idx = monitor.get_feature_index(fd, 0x01, 0x1004, retries=1)
         self.assertEqual(feat_idx, 0x06)
-        self.assertEqual(device.commands[0][3], 0x0d)
-
         self.assertEqual(
-            monitor.query_battery(device, 0x01, feat_idx, monitor.UNIFIED_BATTERY_FEATURE),
+            monitor.query_battery(fd, 0x01, feat_idx, monitor.UNIFIED_BATTERY_FEATURE),
             (60, True),
         )
-        self.assertEqual(device.commands[1][0:4], [0x11, 0x01, 0x06, 0x1d])
+
+        writes = [list(entry[4]) for entry in bus.log if entry[0] == "write"]
+        root_requests = [c for c in writes if c[0] == 0x10 and c[2] == 0x00]
+        battery_requests = [c for c in writes if c[0] == 0x11 and c[2] == 0x06]
+        self.assertEqual([c[3] for c in root_requests], [0x0d])
+        self.assertEqual(battery_requests[0][0:4], [0x11, 0x01, 0x06, 0x1d])
 
     def test_probe_requests_carry_the_probe_software_id(self):
-        class FakeDevice:
-            def __init__(self):
-                self.commands = []
-                self.responses = iter([
-                    [],
-                    [],
-                    [0x11, 0x01, 0x00, 0x0e, 0x03],
-                    [],
-                    [0x11, 0x01, 0x03, 0x2e, 0x03],
-                    [],
-                    [0x11, 0x01, 0x03, 0x2e, 0x03],
-                ])
-
-            def open_path(self, _path):
-                pass
-
-            def write(self, command):
-                self.commands.append(command)
-
-            def read(self, _size, timeout_ms):
-                del timeout_ms
-                return next(self.responses, [])
-
-            def close(self):
-                pass
-
-        device = FakeDevice()
-        original_device = getattr(monitor.hid, "device", None)
-        monitor.hid.device = lambda: device
+        bus, _fd = single_device_bus(
+            0xC547, FakePairedDevice(kind=0x03, battery=50))
+        original_hid = monitor.hid
+        monitor.hid = bus.namespace()
         try:
             self.assertEqual(monitor.get_device_kind(b"/dev/receiver"), 0x03)
         finally:
-            if original_device is None:
-                del monitor.hid.device
-            else:
-                monitor.hid.device = original_device
+            monitor.hid = original_hid
 
-        root_requests = [c for c in device.commands if c[0] == 0x10 and c[2] == 0x00]
-        type_requests = [c for c in device.commands if c[0] == 0x11 and c[2] == 0x03]
+        writes = [list(entry[4]) for entry in bus.log if entry[0] == "write"]
+        root_requests = [c for c in writes if c[0] == 0x10 and c[2] == 0x00]
+        type_requests = [c for c in writes if c[0] == 0x11 and c[2] == 0x03]
+        self.assertTrue(root_requests)
         self.assertTrue(all(c[3] == 0x0e for c in root_requests))
         self.assertTrue(type_requests)
         self.assertTrue(all(c[3] == 0x2e for c in type_requests))
@@ -550,33 +503,296 @@ class BatteryVoltageTests(unittest.TestCase):
         )
 
     def test_voltage_query_uses_function_zero_with_the_monitor_id(self):
-        class FakeDevice:
-            def __init__(self):
-                self.commands = []
-                self.responses = iter([
-                    [],
-                    [0x11, 0x01, 0x07, 0x1d, 0x64, 0x00, 0x00],
-                    [0x11, 0x01, 0x07, 0x0d, 0x0E, 0xF9, 0x00],
-                ])
-
-            def write(self, command):
-                self.commands.append(command)
-
-            def read(self, _size, timeout_ms):
-                del timeout_ms
-                return next(self.responses, [])
-
-        device = FakeDevice()
+        bus, fd = single_device_bus(
+            0xC545,
+            FakePairedDevice(
+                kind=0x00, battery_feature=BATTERY_VOLTAGE_FEATURE, voltage=3833
+            ),
+        )
         self.assertEqual(
             monitor.query_battery(
-                device,
+                fd,
                 0x01,
                 0x07,
                 monitor.BATTERY_VOLTAGE_FEATURE,
             ),
             (55, False),
         )
-        self.assertEqual(device.commands[0][0:4], [0x11, 0x01, 0x07, 0x0d])
+        writes = [list(entry[4]) for entry in bus.log if entry[0] == "write"]
+        battery_requests = [c for c in writes if c[0] == 0x11 and c[2] == 0x07]
+        self.assertEqual(battery_requests[0][0:4], [0x11, 0x01, 0x07, 0x0d])
+
+
+class FakeBusTests(unittest.TestCase):
+    def test_enumerate_filters_by_ids_and_returns_the_hidapi_fields(self):
+        bus = FakeHidBus([
+            FakeNode(b"/dev/a", 0xC547, FakePairedDevice(kind=0x00, battery=50), serial="A1"),
+            FakeNode(b"/dev/b", 0xC54D, FakePairedDevice(kind=0x03, battery=50), serial="B1"),
+        ])
+        found = bus.enumerate(0x046D, 0xC547)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["path"], b"/dev/a")
+        self.assertEqual(found[0]["usage_page"], 0xFF00)
+        self.assertEqual(found[0]["serial_number"], "A1")
+        self.assertEqual(bus.enumerate(0x046D, 0x9999), [])
+
+    def test_every_open_descriptor_receives_its_own_copy(self):
+        bus, first = single_device_bus(
+            0xC547, FakePairedDevice(kind=0x03, battery=50))
+        second = bus.device()
+        second.open_path(b"/dev/receiver")
+
+        first.write([0x10, 0x01, 0x00, 0x0D, 0x10, 0x04, 0x00])
+        report_first = first.read(64, timeout_ms=100)
+        report_second = second.read(64, timeout_ms=100)
+        self.assertEqual(report_first, report_second)
+        self.assertEqual(report_first[4], 0x06)
+
+        self.assertEqual(second.read(64, timeout_ms=20), [])
+
+    def test_nodes_do_not_share_reports(self):
+        bus = FakeHidBus([
+            FakeNode(b"/dev/a", 0xC547, FakePairedDevice(kind=0x00, battery=50)),
+            FakeNode(b"/dev/b", 0xC54D, FakePairedDevice(kind=0x03, battery=50)),
+        ])
+        fd_a = bus.device()
+        fd_a.open_path(b"/dev/a")
+        fd_b = bus.device()
+        fd_b.open_path(b"/dev/b")
+
+        fd_a.write([0x10, 0x01, 0x00, 0x0D, 0x10, 0x04, 0x00])
+        self.assertTrue(fd_a.read(64, timeout_ms=100))
+        self.assertEqual(fd_b.read(64, timeout_ms=20), [])
+
+    def test_a_closed_descriptor_refuses_further_use(self):
+        _bus, fd = single_device_bus(
+            0xC547, FakePairedDevice(kind=0x03, battery=50))
+        fd.close()
+        with self.assertRaises(OSError):
+            fd.read(64, timeout_ms=10)
+        with self.assertRaises(OSError):
+            fd.write([0x10])
+
+    def test_an_empty_read_waits_for_its_timeout(self):
+        _bus, fd = single_device_bus(
+            0xC547, FakePairedDevice(kind=0x03, battery=50))
+        started = time.monotonic()
+        self.assertEqual(fd.read(64, timeout_ms=120), [])
+        self.assertGreaterEqual(time.monotonic() - started, 0.1)
+
+    def test_an_injected_report_wakes_a_blocked_read(self):
+        bus, fd = single_device_bus(
+            0xC547, FakePairedDevice(kind=0x03, battery=42))
+        result = {}
+
+        def blocked_read():
+            result["report"] = fd.read(64, timeout_ms=2000)
+
+        reader = threading.Thread(target=blocked_read)
+        reader.start()
+        time.sleep(0.05)
+        started = time.monotonic()
+        bus.emit_battery_event(b"/dev/receiver", battery=42)
+        reader.join(timeout=1)
+        self.assertFalse(reader.is_alive())
+        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertEqual(result["report"][4], 42)
+
+    def test_a_sleeping_device_does_not_answer(self):
+        bus, fd = single_device_bus(
+            0xC547, FakePairedDevice(kind=0x03, battery=50, awake=False))
+        fd.write([0x10, 0x01, 0x00, 0x0D, 0x10, 0x04, 0x00])
+        self.assertEqual(fd.read(64, timeout_ms=30), [])
+        self.assertEqual(bus.protocol_errors, [])
+
+    def test_an_absent_feature_resolves_to_index_zero(self):
+        _bus, fd = single_device_bus(
+            0xC547, FakePairedDevice(kind=0x03, battery=50))
+        fd.write([0x10, 0x01, 0x00, 0x0D, 0x10, 0x00, 0x00])
+        report = fd.read(64, timeout_ms=100)
+        self.assertEqual(report[4], 0x00)
+
+    def test_stop_wakes_readers_and_silences_the_bus(self):
+        bus, fd = single_device_bus(
+            0xC547, FakePairedDevice(kind=0x03, battery=50))
+        result = {}
+
+        def blocked_read():
+            result["report"] = fd.read(64, timeout_ms=5000)
+
+        reader = threading.Thread(target=blocked_read)
+        reader.start()
+        time.sleep(0.05)
+        bus.stop()
+        reader.join(timeout=1)
+        self.assertFalse(reader.is_alive())
+        self.assertEqual(result["report"], [])
+
+
+class ForeignResponseTests(unittest.TestCase):
+    def test_a_foreign_root_response_cannot_replace_the_requested_feature(self):
+        for order_name in ("monitor_first", "probe_first"):
+            with self.subTest(order=order_name):
+                self._run_ordered_lookup(order_name)
+
+    def _run_ordered_lookup(self, order_name):
+        bus, fd_monitor = single_device_bus(
+            0xC547, FakePairedDevice(kind=0x03, battery=50),
+            path=b"/dev/shared")
+        fd_probe = bus.device()
+        fd_probe.open_path(b"/dev/shared")
+        gate = bus.hold_responses(b"/dev/shared", 2, is_root_lookup)
+        results = {}
+
+        def monitor_lookup():
+            results["monitor"] = monitor.get_feature_index(fd_monitor, 0x01, 0x1004)
+
+        def probe_lookup():
+            results["probe"] = monitor.get_feature_index(
+                fd_probe, 0x01, 0x0005, swid=0x0E)
+
+        threads = [threading.Thread(target=monitor_lookup),
+                   threading.Thread(target=probe_lookup)]
+        for thread in threads:
+            thread.start()
+        gate.wait_until_full(3)
+
+        monitor_index = next(
+            i for i, request in enumerate(gate.requests()) if request[3] == 0x0D)
+        probe_index = 1 - monitor_index
+        if order_name == "monitor_first":
+            gate.release([monitor_index, probe_index])
+        else:
+            gate.release([probe_index, monitor_index])
+        for thread in threads:
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+
+        self.assertEqual(results["monitor"], 0x06)
+        self.assertEqual(results["probe"], 0x03)
+
+
+class BusIntegrationTests(unittest.TestCase):
+    def test_each_shared_receiver_publishes_its_own_battery(self):
+        bus = FakeHidBus([
+            FakeNode(b"/dev/kbd", 0xC547,
+                     FakePairedDevice(kind=0x00, battery=59), serial="K1"),
+            FakeNode(b"/dev/mouse", 0xC547,
+                     FakePairedDevice(kind=0x03, battery=41), serial="M1"),
+        ])
+        with DaemonHarness(bus) as harness:
+            barrier = threading.Barrier(2)
+            harness.start_wireless(0xC547, "keyboard", 9, barrier=barrier)
+            harness.start_wireless(0xC547, "mouse", 10, barrier=barrier)
+            harness.wait_for_state("keyboard", "59\n1\n0")
+            harness.wait_for_state("mouse", "41\n1\n0")
+
+            report = harness.stop()
+            self.assertEqual(report["alive"], [])
+            self.assertEqual(report["errors"], [])
+            self.assertEqual(report["protocol_errors"], [])
+            self.assertEqual(
+                harness.state_file("keyboard").read_text(), "59\n1\n0")
+            self.assertEqual(
+                harness.state_file("mouse").read_text(), "41\n1\n0")
+
+    def test_an_injected_battery_event_updates_the_state(self):
+        bus = FakeHidBus([
+            FakeNode(b"/dev/sl2", 0xC54D,
+                     FakePairedDevice(kind=0x03, battery=50)),
+        ])
+        with DaemonHarness(bus) as harness:
+            harness.start_wireless(0xC54D, "mouse", 10)
+            harness.wait_for_state("mouse", "50\n1\n0")
+            harness.wait_for_open(b"/dev/sl2")
+
+            bus.emit_battery_event(b"/dev/sl2", battery=37)
+            harness.wait_for_state("mouse", "37\n1\n0")
+
+    def test_link_events_toggle_the_published_state(self):
+        bus = FakeHidBus([
+            FakeNode(b"/dev/sl2", 0xC54D,
+                     FakePairedDevice(kind=0x03, battery=50)),
+        ])
+        with DaemonHarness(bus) as harness:
+            harness.start_wireless(0xC54D, "mouse", 10)
+            harness.wait_for_state("mouse", "50\n1\n0")
+            harness.wait_for_open(b"/dev/sl2")
+
+            bus.emit_link(b"/dev/sl2", off=True)
+            harness.wait_for_state("mouse", "0\n0\n0")
+
+            bus.emit_link(b"/dev/sl2", off=False)
+            harness.wait_for_state("mouse", "50\n1\n0")
+
+    def test_a_wired_device_uses_the_direct_device_index(self):
+        bus = FakeHidBus([
+            FakeNode(b"/dev/wired", 0xC09B,
+                     FakePairedDevice(kind=0x03, battery=66), device_idx=0xFF),
+        ])
+        with DaemonHarness(bus) as harness:
+            harness.start_wired(0xC09B, "mouse", 10)
+            harness.wait_for_state("mouse", "66\n1\n0")
+
+        writes = [list(entry[4]) for entry in bus.log if entry[0] == "write"]
+        hidpp_requests = [c for c in writes if c[0] in (0x10, 0x11) and c[2] != 0x80]
+        self.assertTrue(hidpp_requests)
+        self.assertTrue(all(c[1] == 0xFF for c in hidpp_requests))
+
+
+class SleepingReceiverTests(unittest.TestCase):
+    def test_a_sleeping_receiver_publishes_no_state(self):
+        bus = FakeHidBus([
+            FakeNode(b"/dev/shared", 0xC547,
+                     FakePairedDevice(kind=0x03, battery=50, awake=False),
+                     serial="S1"),
+        ])
+        with DaemonHarness(bus) as harness:
+            harness.start_wireless(0xC547, "mouse", 10)
+
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                sessions = harness.probe_sessions(b"/dev/shared")
+                if sessions and sessions[0][1] is not None:
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("the probe session never closed")
+
+            time.sleep(0.2)
+            self.assertEqual(len(harness.probe_sessions(b"/dev/shared")), 1)
+            self.assertFalse(harness.state_file("mouse").exists())
+
+            report = harness.stop()
+            self.assertEqual(report["alive"], [])
+            self.assertEqual(report["errors"], [])
+
+
+class DeviceCoverageTests(unittest.TestCase):
+    EMULATED_SHEETS = {
+        (0xC545, 0xC343): ("keyboard", 9, FakePairedDevice(
+            kind=0x00, battery_feature=BATTERY_VOLTAGE_FEATURE, voltage=3833)),
+        (0xC547, 0xC357): ("keyboard", 9, FakePairedDevice(
+            kind=0x00, battery=59)),
+        (0xC547, 0xC094): ("mouse", 10, FakePairedDevice(
+            kind=0x03, battery=41)),
+        (0xC54D, 0xC09B): ("mouse", 10, FakePairedDevice(
+            kind=0x03, battery=50)),
+    }
+
+    def test_every_supported_device_has_an_emulated_sheet(self):
+        declared = {(wireless, wired): (name, signal)
+                    for wireless, wired, name, signal in monitor.DEVICES}
+        self.assertEqual(set(declared), set(self.EMULATED_SHEETS))
+        for pids, (name, signal) in declared.items():
+            self.assertEqual((name, signal), self.EMULATED_SHEETS[pids][:2])
+
+    def test_only_the_g915_tkl_reports_voltage(self):
+        self.assertEqual(set(monitor.BATTERY_FEATURE_BY_RECEIVER), {0xC545})
+        self.assertEqual(
+            self.EMULATED_SHEETS[(0xC545, 0xC343)][2].battery_feature,
+            0x1001,
+        )
 
 
 if __name__ == "__main__":

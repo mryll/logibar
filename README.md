@@ -493,6 +493,18 @@ To add another Logitech device to the keyboard and mouse daemon:
 
 4. To make a module for one device, copy `logibar-keyboard`, then set new values for `ICON`, `TOOLTIP` and `STATE_FILE`. Give the new Waybar module the same signal number as the daemon.
 
+5. Add an emulated sheet for the device to `EMULATED_SHEETS` in `tests/test_hidpp_monitor.py` — `make test` fails until every entry of `DEVICES` has one. Test with your physical hardware too: the sheet protects the device on FUTURE refactors of the daemon (the maintainer does not own every supported device), but it can only prove that the daemon honors what the sheet declares — it cannot prove that the sheet matches the real device.
+
+   ```python
+   EMULATED_SHEETS = {
+       ...
+       (0xNEW1, 0xNEW2): ("newdevice", 11, FakePairedDevice(
+           kind=0x03, battery=50)),
+   }
+   ```
+
+   `tests/fake_hid.py` emulates the hidraw layer: declared devices answer HID++ from their sheet, and every open descriptor receives a copy of every report, so the daemon runs against it unmodified. Note that the daemon's `DEVICE_KIND` only knows `keyboard` and `mouse` today — a new device TYPE also needs changes there and in the frontends.
+
 > [!TIP]
 > The [`tools/`](tools/) directory helps you to find the correct IDs:
 > - `logibar-hidpp-battery <hidraw_device>` — reads the battery of any HID++ 2.0 device
