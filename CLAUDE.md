@@ -9,7 +9,7 @@
 
 ## Non-Obvious Rules
 
-- **Quickshell emits NEITHER `started` NOR `exited` when the command does not exist** — `running` just drops back to false. `sawExit` is the discriminator: no `exited` = the run could not start; an `exited` run with empty output is an operational failure, never "not installed".
+- **The CLI always runs through `/bin/sh -c 'exec "$0" "$@"'`, never direct.** Handing Quickshell 0.3.1 a nonexistent binary can ABORT the whole shell inside the failed start (claudebar#6) — before any QML signal fires. sh always starts; a failed exec is sh exiting 127 (not found) or 126 (not executable). The failed-start discriminator is `!sawExit || exitCode === 126 || exitCode === 127` on empty output; `!sawExit` stays as the belt for a Quickshell that emits neither `started` nor `exited`. An `exited` run with empty output and any other code is an operational failure, never "not installed".
 - **`installCmd` is the one constant** — the message shows it and the button copies it (`Util.execArgv(["wl-copy", ...])`, no shell line, no trailing newline). The button gates on `notInstalled`, never on error text. Pinned in `test_copy_button.sh`.
 
 - **A tooltip meter is PARKED, not rendered in place.** The bar has to reach the tooltip's right edge, and that edge is the widest TEXT line — which does not exist yet while the lines are being collected. So a meter pushes `METER:<i>` into `lines` plus one entry in the parallel `meter_*` arrays, and the width pass resolves it. The width pass MUST skip `METER:` lines, or the measurement is circular. Every meter in one tooltip gets the SAME bar length: they stack, so a reader compares them against each other.

@@ -20,7 +20,12 @@ check "onExited sets sawExit"              grep -qF 'root.sawExit = true' "$pane
 check "startRun resets tripwireFired"     grep -qF 'tripwireFired = false' "$panel"
 check "the empty branch gates on the per-run tripwire flag, not stale text" \
                                            grep -qF 'if (tripwireFired) {' "$panel"
-check "not-installed gated on !sawExit"    grep -qF '} else if (!sawExit) {' "$panel"
+check "not-installed gated on !sawExit or exec-failure codes" \
+    grep -qF '} else if (!sawExit || exitCode === 126 || exitCode === 127) {' "$panel"
+check "the command is wrapped in sh" \
+    grep -qF "statusProc.command = [\"/bin/sh\", \"-c\", 'exec \"\$0\" \"\$@\"'].concat(cmd)" "$panel"
+check "statusProc.command is assigned exactly once" \
+    test "$(grep -cF 'statusProc.command =' "$panel")" = 1
 check "a run that exited empty never claims not-installed" \
                                            grep -qF 'produced no output (exit ' "$panel"
 check "installCmd literal appears exactly once" \
