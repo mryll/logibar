@@ -15,6 +15,9 @@ VID = 0x046d
 PID = 0x0af7
 STATE_DIR = os.path.join(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}'), 'logibar')
 STATE_FILE = os.path.join(STATE_DIR, 'headset')
+# Fourth line of the state file. One daemon, one model: the frontends show it
+# as the device name. Printable ASCII, 48 characters at most.
+MODEL = 'PRO X 2 LIGHTSPEED'
 POLL_INTERVAL = 60  # seconds between battery polls when headset is on
 
 # Comando para solicitar bateria
@@ -35,7 +38,7 @@ def write_state(battery, connected, charging):
     global last_written_state
 
     os.makedirs(STATE_DIR, exist_ok=True, mode=0o700)
-    new_state = f"{battery}\n{1 if connected else 0}\n{1 if charging else 0}"
+    new_state = f"{battery}\n{1 if connected else 0}\n{1 if charging else 0}\n{MODEL if connected else ''}"
 
     # Skip if state hasn't changed
     if new_state == last_written_state:

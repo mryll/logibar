@@ -91,7 +91,19 @@ MAX_STATE_BYTES=$((64 * 1024))
 # Device registry — ids, Nerd Font identity glyphs, display names.
 DEVICE_IDS=(keyboard mouse headset)
 declare -A DEVICE_ICON=([keyboard]="󰌌" [mouse]="󰍽" [headset]="󰋎")
+# Generic names: the fallback when a state file has no model line (an older
+# daemon) or the line is not a plain model name.
 declare -A DEVICE_NAME=([keyboard]="G915 TKL" [mouse]="Logitech mouse" [headset]="PRO X 2 Headset")
+# The model is text somebody else writes: printable ASCII, 48 characters at
+# most, or the generic name stays.
+MODEL_RE='^[A-Za-z0-9 ._()+/-]{1,48}$'
+# The ranges are byte ranges only under the C locale: under en_US.UTF-8
+# `[A-Za-z]` also matches «é» or a fullwidth «Ａ» (two columns, breaks the
+# frame). `local LC_ALL` pins the locale for this check alone.
+is_plain_model() {  # is_plain_model TEXT
+    local LC_ALL=C
+    [[ "$1" =~ $MODEL_RE ]]
+}
 
 # Severity thresholds — single source of truth (mirrored nowhere else).
 WARNING_LEVEL=20
@@ -244,19 +256,25 @@ command -v dd >/dev/null 2>&1 || cli_error "dd is required"
 $JSON_MODE && $WATCH && cli_error "--watch only makes sense in waybar mode"
 
 # --- Read state files into parallel arrays ---
-# Sets: BATTERY[id] CONNECTED[id] CHARGING[id] STATE[id] UPDATED[id]
-declare -A BATTERY CONNECTED CHARGING STATE UPDATED
+# Sets: BATTERY[id] CONNECTED[id] CHARGING[id] STATE[id] UPDATED[id] NAME[id]
+declare -A BATTERY CONNECTED CHARGING STATE UPDATED NAME
 read_devices() {
-    local id file battery connected charging blob
+    local id file battery connected charging model blob
     for id in "${DEVICES[@]}"; do
         file="$STATE_DIR/$id"
         BATTERY[$id]=""; CONNECTED[$id]=0; CHARGING[$id]=0; STATE[$id]="disconnected"; UPDATED[$id]=""
+        NAME[$id]="${DEVICE_NAME[$id]}"
         # One bounded read instead of three `sed -n Np`: it also collapses
         # three opens of a file somebody else writes into one, so the state
         # cannot change shape between the first line and the third.
         blob=$(read_bounded "$file" "$MAX_STATE_BYTES") || continue
-        battery=""; connected=""; charging=""
-        { IFS= read -r battery; IFS= read -r connected; IFS= read -r charging; } <<< "$blob"
+        battery=""; connected=""; charging=""; model=""
+        { IFS= read -r battery; IFS= read -r connected; IFS= read -r charging; IFS= read -r model; } <<< "$blob"
+        # Fourth line: the model the daemon matched. The slice bounds the
+        # regex before it runs; anything that is not a plain name keeps the
+        # generic one.
+        model=${model:0:64}
+        is_plain_model "$model" && NAME[$id]="$model"
         UPDATED[$id]=$(date -Iseconds -d "@$(stat -c %Y "$file" 2>/dev/null || echo 0)" 2>/dev/null)
         [[ "$battery" =~ ^[0-9]+$ ]] || continue
         # `connected` is the only connection flag. A battery of 0 with the
@@ -299,7 +317,7 @@ emit_json() {
     local rows="[]" id
     for id in "${DEVICES[@]}"; do
         rows=$(jq -c \
-            --arg id "$id" --arg name "${DEVICE_NAME[$id]}" --arg state "${STATE[$id]}" \
+            --arg id "$id" --arg name "${NAME[$id]}" --arg state "${STATE[$id]}" \
             --arg battery "${BATTERY[$id]}" --arg updated "${UPDATED[$id]}" \
             --argjson connected "$([[ "${CONNECTED[$id]}" == "1" ]] && echo true || echo false)" \
             --argjson charging "$([[ "${CHARGING[$id]}" == "1" ]] && echo true || echo false)" \
@@ -584,7 +602,7 @@ emit_waybar() {
         if [[ "${CHARGING[$id]}" == "1" ]]; then status="Charging"; else status="On battery"; fi
         _bglyph=$(battery_glyph "${BATTERY[$id]}" "${CHARGING[$id]}")
         lines+=("")
-        lines+=(" $(tip_c "$FG" "  ${DEVICE_ICON[$id]}  ${DEVICE_NAME[$id]}")")
+        lines+=(" $(tip_c "$FG" "  ${DEVICE_ICON[$id]}  ${NAME[$id]}")")
         # Parked: the bar length is not known until every other line exists.
         meter_pct+=("${BATTERY[$id]}")
         meter_color+=("$(ramp_color "${BATTERY[$id]}")")

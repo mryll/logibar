@@ -195,7 +195,7 @@ done
 
 # ── the caps themselves ──────────────────────────────────────────────────────
 #
-# 64 KiB for a three-line state file, 256 KiB for a hand-written theme or
+# 64 KiB for a four-line state file, 256 KiB for a hand-written theme or
 # palette cache. Hard-coded here so that widening a cap turns this suite red.
 
 checkeq "logibar-status: state cap is 64 KiB" 65536 "$(const_of logibar-status MAX_STATE_BYTES)"
@@ -330,6 +330,30 @@ check   "a 10 MiB state file still reads 77%" jq -e '.text | test("77")' <<< "$O
 run_capture logibar-keyboard
 checkeq "legacy widget: a 10 MiB state file still answers (rc)" 0 "$RC"
 check   "legacy widget: a 10 MiB state file still reads 77%" jq -e '.text | test("77%")' <<< "$OUT"
+# The fourth line of that file is the model, and here it is a 64 KiB run of
+# `x` (the cap, written out by hand: 65536). A model is accepted only up to 48
+# printable characters, so the tooltip must carry the generic name and never
+# the blob — and the run must stay fast: the regex sees at most 64 characters.
+check   "a 10 MiB model line stays out of the tooltip" \
+    jq -e '.tooltip | test("G915 TKL") and (test("xxxxxxxx") | not) and (length < 4096)' <<< "$OUT"
+run_capture logibar-status
+check   "a 10 MiB model line stays out of the combined tooltip" \
+    jq -e '.tooltip | test("G915 TKL") and (test("xxxxxxxx") | not) and (length < 4096)' <<< "$OUT"
+# Control bytes and invalid UTF-8 in the model line, written out by hand so
+# the case is the same on every run: a 0x01 inside a name, a tab, and two
+# bytes that are not UTF-8 at all. Each one keeps the generic name.
+for _bad in 'G\001Pro' 'G\tPro' '\377\376X'; do
+    reset_all
+    { printf '77\n1\n0\n'; printf "$_bad"; } > "$TMP/run/logibar/keyboard"
+    run_capture logibar-keyboard
+    checkeq "control bytes in the model line ($_bad) (rc)" 0 "$RC"
+    check   "control bytes in the model line ($_bad) keep the generic name" \
+        jq -e '.tooltip | test("G915 TKL") and (test("Pro|X") | not)' <<< "$OUT"
+    run_capture logibar-status --json
+    checkeq "control bytes in the model line ($_bad), combined (rc)" 0 "$RC"
+    check   "control bytes in the model line ($_bad), combined" \
+        jq -e '(.devices[] | select(.id == "keyboard") | .name) == "G915 TKL"' <<< "$OUT"
+done
 
 reset_all
 mkdir -p "$TMP/cache/wal"

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import importlib.util
+import os
 import sys
 import tempfile
 import threading
@@ -407,7 +408,7 @@ class StateAggregationTests(unittest.TestCase):
                 self.assertFalse(wired_thread.is_alive())
                 self.assertEqual(
                     (Path(state_dir) / "mouse").read_text(),
-                    "75\n1\n0",
+                    "75\n1\n0\n",
                 )
         finally:
             monitor.STATE_DIR = original_state_dir
@@ -433,7 +434,7 @@ class StateAggregationTests(unittest.TestCase):
                 monitor.write_state("mouse", 60, True, False, 10, superlight_2)
                 self.assertEqual(
                     (Path(state_dir) / "mouse").read_text(),
-                    "40\n1\n0",
+                    "40\n1\n0\n",
                 )
         finally:
             monitor.STATE_DIR = original_state_dir
@@ -459,13 +460,13 @@ class StateAggregationTests(unittest.TestCase):
                 monitor.write_state("mouse", 0, False, False, 10, original)
                 self.assertEqual(
                     (Path(state_dir) / "mouse").read_text(),
-                    "60\n1\n0",
+                    "60\n1\n0\n",
                 )
 
                 monitor.write_state("mouse", 0, False, False, 10, superlight_2)
                 self.assertEqual(
                     (Path(state_dir) / "mouse").read_text(),
-                    "0\n0\n0",
+                    "0\n0\n0\n",
                 )
         finally:
             monitor.STATE_DIR = original_state_dir
@@ -485,7 +486,7 @@ class BatteryVoltageTests(unittest.TestCase):
         )
 
     def test_g915_tkl_uses_battery_voltage(self):
-        self.assertIn((0xC545, 0xC343, "keyboard", 9), monitor.DEVICES)
+        self.assertIn((0xC545, 0xC343, "keyboard", 9, "G915 TKL"), monitor.DEVICES)
         self.assertEqual(
             monitor.BATTERY_FEATURE_BY_RECEIVER[0xC545],
             monitor.BATTERY_VOLTAGE_FEATURE,
@@ -692,13 +693,13 @@ class BusIntegrationTests(unittest.TestCase):
             # Use the production entry point so this also exercises the PID
             # table's battery-feature selection, not a test-supplied feature.
             harness.threads.extend(harness.module.monitor_device(0xC539, 0xC088, "mouse", 10))
-            harness.wait_for_state("mouse", "23\n1\n0")
+            harness.wait_for_state("mouse", "23\n1\n0\nG Pro Wireless")
             bus.emit_battery_event(b"/dev/gpro", voltage=3833, charging=True)
-            harness.wait_for_state("mouse", "55\n1\n1")
+            harness.wait_for_state("mouse", "55\n1\n1\nG Pro Wireless")
             bus.emit_link(b"/dev/gpro", off=True)
-            harness.wait_for_state("mouse", "0\n0\n0")
+            harness.wait_for_state("mouse", "0\n0\n0\n")
             bus.emit_link(b"/dev/gpro", off=False)
-            harness.wait_for_state("mouse", "55\n1\n1")
+            harness.wait_for_state("mouse", "55\n1\n1\nG Pro Wireless")
             report = harness.stop()
             self.assertEqual(report["alive"], [])
             self.assertEqual(report["protocol_errors"], [])
@@ -738,9 +739,9 @@ class BusIntegrationTests(unittest.TestCase):
         ])
         with DaemonHarness(bus) as harness:
             harness.threads.extend(harness.module.monitor_device(0xC539, 0xC088, "mouse", 10))
-            harness.wait_for_state("mouse", "55\n1\n1")
+            harness.wait_for_state("mouse", "55\n1\n1\nG Pro Wireless")
             bus.emit_battery_event(b"/dev/gpro-wired", voltage=4186, charging=False)
-            harness.wait_for_state("mouse", "100\n1\n0")
+            harness.wait_for_state("mouse", "100\n1\n0\nG Pro Wireless")
             report = harness.stop()
             self.assertEqual(report["alive"], [])
             self.assertEqual(report["protocol_errors"], [])
@@ -756,17 +757,17 @@ class BusIntegrationTests(unittest.TestCase):
             barrier = threading.Barrier(2)
             harness.start_wireless(0xC547, "keyboard", 9, barrier=barrier)
             harness.start_wireless(0xC547, "mouse", 10, barrier=barrier)
-            harness.wait_for_state("keyboard", "59\n1\n0")
-            harness.wait_for_state("mouse", "41\n1\n0")
+            harness.wait_for_state("keyboard", "59\n1\n0\n")
+            harness.wait_for_state("mouse", "41\n1\n0\n")
 
             report = harness.stop()
             self.assertEqual(report["alive"], [])
             self.assertEqual(report["errors"], [])
             self.assertEqual(report["protocol_errors"], [])
             self.assertEqual(
-                harness.state_file("keyboard").read_text(), "59\n1\n0")
+                harness.state_file("keyboard").read_text(), "59\n1\n0\n")
             self.assertEqual(
-                harness.state_file("mouse").read_text(), "41\n1\n0")
+                harness.state_file("mouse").read_text(), "41\n1\n0\n")
 
     def test_an_injected_battery_event_updates_the_state(self):
         bus = FakeHidBus([
@@ -775,11 +776,83 @@ class BusIntegrationTests(unittest.TestCase):
         ])
         with DaemonHarness(bus) as harness:
             harness.start_wireless(0xC54D, "mouse", 10)
-            harness.wait_for_state("mouse", "50\n1\n0")
+            harness.wait_for_state("mouse", "50\n1\n0\n")
             harness.wait_for_open(b"/dev/sl2")
 
             bus.emit_battery_event(b"/dev/sl2", battery=37)
-            harness.wait_for_state("mouse", "37\n1\n0")
+            harness.wait_for_state("mouse", "37\n1\n0\n")
+
+    def test_the_published_model_follows_the_selected_source(self):
+        # Two mice, one logical "mouse" file: the lowest battery wins, and the
+        # model line must be the one of THAT source — a G Pro number under a
+        # Superlight name would be a wrong reading, not a cosmetic slip.
+        bus = FakeHidBus([
+            FakeNode(b"/dev/gpro", 0xC539, FakePairedDevice(
+                kind=0x03, battery_feature=BATTERY_VOLTAGE_FEATURE,
+                voltage=3833, battery_index=0x06)),
+            FakeNode(b"/dev/sl2", 0xC54D,
+                     FakePairedDevice(kind=0x03, battery=30)),
+        ])
+        with DaemonHarness(bus) as harness:
+            harness.threads.extend(harness.module.monitor_device(0xC539, 0xC088, "mouse", 10))
+            harness.threads.extend(harness.module.monitor_device(0xC54D, 0xC09B, "mouse", 10))
+            harness.wait_for_state("mouse", "30\n1\n0\nPRO X Superlight 2")
+            bus.emit_battery_event(b"/dev/sl2", battery=90)
+            harness.wait_for_state("mouse", "55\n1\n0\nG Pro Wireless")
+            bus.emit_link(b"/dev/gpro", off=True)
+            harness.wait_for_state("mouse", "90\n1\n0\nPRO X Superlight 2")
+            bus.emit_link(b"/dev/sl2", off=True)
+            harness.wait_for_state("mouse", "0\n0\n0\n")
+            report = harness.stop()
+            self.assertEqual(report["protocol_errors"], [])
+
+    def test_a_model_only_change_is_published(self):
+        # Same battery, same charging on both sources: when the shown source
+        # goes away the number does not move, only the name does — and the
+        # dedup must still publish, or the file names a mouse that is gone.
+        bus = FakeHidBus([
+            FakeNode(b"/dev/gpro", 0xC539, FakePairedDevice(
+                kind=0x03, battery_feature=BATTERY_VOLTAGE_FEATURE,
+                voltage=3811, battery_index=0x06)),   # 50%
+            FakeNode(b"/dev/sl2", 0xC54D,
+                     FakePairedDevice(kind=0x03, battery=50)),
+        ])
+        with DaemonHarness(bus) as harness:
+            harness.threads.extend(harness.module.monitor_device(0xC54D, 0xC09B, "mouse", 10))
+            harness.wait_for_state("mouse", "50\n1\n0\nPRO X Superlight 2")
+            harness.threads.extend(harness.module.monitor_device(0xC539, 0xC088, "mouse", 10))
+            # Equal batteries keep the first source on the file, so the second
+            # one is invisible there: wait on the daemon's own source table.
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                with harness.module.publish_lock:
+                    sources = dict(harness.module.source_states.get("mouse", {}))
+                if sum(1 for src in sources.values() if src[1]) == 2:
+                    break
+                time.sleep(0.02)
+            else:
+                self.fail(f"second source never connected: {sources}")
+            bus.emit_link(b"/dev/sl2", off=True)
+            harness.wait_for_state("mouse", "50\n1\n0\nG Pro Wireless")
+            report = harness.stop()
+            self.assertEqual(report["protocol_errors"], [])
+
+    def test_a_shared_receiver_names_each_device_through_the_table(self):
+        # c547 carries a keyboard and a mouse; through the production entry
+        # point each logical file gets the model of its own table entry.
+        bus = FakeHidBus([
+            FakeNode(b"/dev/kbd", 0xC547,
+                     FakePairedDevice(kind=0x00, battery=59), serial="K1"),
+            FakeNode(b"/dev/mouse", 0xC547,
+                     FakePairedDevice(kind=0x03, battery=41), serial="M1"),
+        ])
+        with DaemonHarness(bus) as harness:
+            harness.threads.extend(harness.module.monitor_device(0xC547, 0xC357, "keyboard", 9))
+            harness.threads.extend(harness.module.monitor_device(0xC547, 0xC094, "mouse", 10))
+            harness.wait_for_state("keyboard", "59\n1\n0\nG915 X TKL")
+            harness.wait_for_state("mouse", "41\n1\n0\nPRO X Superlight")
+            report = harness.stop()
+            self.assertEqual(report["protocol_errors"], [])
 
     def test_link_events_toggle_the_published_state(self):
         bus = FakeHidBus([
@@ -788,14 +861,14 @@ class BusIntegrationTests(unittest.TestCase):
         ])
         with DaemonHarness(bus) as harness:
             harness.start_wireless(0xC54D, "mouse", 10)
-            harness.wait_for_state("mouse", "50\n1\n0")
+            harness.wait_for_state("mouse", "50\n1\n0\n")
             harness.wait_for_open(b"/dev/sl2")
 
             bus.emit_link(b"/dev/sl2", off=True)
-            harness.wait_for_state("mouse", "0\n0\n0")
+            harness.wait_for_state("mouse", "0\n0\n0\n")
 
             bus.emit_link(b"/dev/sl2", off=False)
-            harness.wait_for_state("mouse", "50\n1\n0")
+            harness.wait_for_state("mouse", "50\n1\n0\n")
 
     def test_a_wired_device_uses_the_direct_device_index(self):
         bus = FakeHidBus([
@@ -804,7 +877,7 @@ class BusIntegrationTests(unittest.TestCase):
         ])
         with DaemonHarness(bus) as harness:
             harness.start_wired(0xC09B, "mouse", 10)
-            harness.wait_for_state("mouse", "66\n1\n0")
+            harness.wait_for_state("mouse", "66\n1\n0\n")
 
         writes = [list(entry[4]) for entry in bus.log if entry[0] == "write"]
         hidpp_requests = [c for c in writes if c[0] in (0x10, 0x11) and c[2] != 0x80]
@@ -857,10 +930,22 @@ class DeviceCoverageTests(unittest.TestCase):
 
     def test_every_supported_device_has_an_emulated_sheet(self):
         declared = {(wireless, wired): (name, signal)
-                    for wireless, wired, name, signal in monitor.DEVICES}
+                    for wireless, wired, name, signal, _ in monitor.DEVICES}
         self.assertEqual(set(declared), set(self.EMULATED_SHEETS))
         for pids, (name, signal) in declared.items():
             self.assertEqual((name, signal), self.EMULATED_SHEETS[pids][:2])
+
+    def test_every_model_is_a_plain_name_the_widgets_accept(self):
+        # The widgets take the model line only when it is printable ASCII of
+        # at most 48 characters (MODEL_RE in logibar-status); a model outside
+        # that set would silently show as the generic name.
+        import re
+        plain = re.compile(r"[A-Za-z0-9 ._()+/-]{1,48}")
+        models = [model for _, _, _, _, model in monitor.DEVICES]
+        for model in models:
+            self.assertIsNotNone(plain.fullmatch(model), model)
+        self.assertEqual(len(models), len(set(models)))
+        self.assertEqual(monitor.MODEL_BY_PIDS[(0xC539, 0xC088)], "G Pro Wireless")
 
     def test_g915_tkl_and_g_pro_wireless_report_voltage(self):
         self.assertEqual(set(monitor.BATTERY_FEATURE_BY_RECEIVER), {0xC545, 0xC539})
@@ -872,6 +957,48 @@ class DeviceCoverageTests(unittest.TestCase):
             self.EMULATED_SHEETS[(0xC539, 0xC088)][2].battery_feature,
             0x1001,
         )
+
+
+class HeadsetStateFileTests(unittest.TestCase):
+    """The headset daemon writes the same four-line contract."""
+
+    def _load(self, state_dir):
+        original = sys.modules.get("hid")
+        sys.modules["hid"] = types.SimpleNamespace()
+        env = os.environ.get("XDG_RUNTIME_DIR")
+        os.environ["XDG_RUNTIME_DIR"] = state_dir
+        try:
+            script = Path(__file__).parent.parent / "logibar-headset-monitor"
+            ldr = SourceFileLoader("logibar_headset_monitor_test", str(script))
+            sp = importlib.util.spec_from_loader(ldr.name, ldr)
+            mod = importlib.util.module_from_spec(sp)
+            ldr.exec_module(mod)
+        finally:
+            if original is None:
+                sys.modules.pop("hid", None)
+            else:
+                sys.modules["hid"] = original
+            if env is None:
+                os.environ.pop("XDG_RUNTIME_DIR", None)
+            else:
+                os.environ["XDG_RUNTIME_DIR"] = env
+        return mod
+
+    def test_the_headset_publishes_its_model_only_while_connected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mod = self._load(tmp)
+            mod.subprocess.run = lambda *a, **k: None   # no pkill from a test
+            state = Path(tmp) / "logibar" / "headset"
+            mod.write_state(64, True, False)
+            self.assertEqual(state.read_text(), "64\n1\n0\nPRO X 2 LIGHTSPEED")
+            first = state.stat().st_ino
+            mod.write_state(64, True, False)
+            self.assertEqual(state.stat().st_ino, first, "an identical state is not rewritten")
+            mod.write_state(64, True, True)
+            self.assertEqual(state.read_text(), "64\n1\n1\nPRO X 2 LIGHTSPEED")
+            mod.write_state(0, False, False)
+            self.assertEqual(state.read_text(), "0\n0\n0\n")
+            self.assertRegex(mod.MODEL, r"^[A-Za-z0-9 ._()+/-]{1,48}$")
 
 
 if __name__ == "__main__":

@@ -781,6 +781,7 @@ Panel {
         anchors.verticalCenter: parent.verticalCenter
 
         Text {
+          id: identityGlyph
           text: section.device ? (root.identityGlyphs[section.device.id] || "") : ""
           textFormat: Text.PlainText
           color: root.foreground
@@ -795,6 +796,10 @@ Panel {
           color: root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
+          // A Row does not bound its children, so `elide` alone does nothing:
+          // the model name (up to 48 chars from the state file) needs the
+          // width left of the percentage, or it runs under it.
+          width: Math.max(0, nameRow.width - identityGlyph.width - nameRow.spacing)
           elide: Text.ElideRight
           verticalAlignment: Text.AlignVCenter
         }

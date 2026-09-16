@@ -41,6 +41,18 @@ read_bounded() {  # read_bounded PATH MAXBYTES
 # already absurdly generous. This widget reads no theme: its palette comes
 # from `logibar-status --json`, which bounds the theme read on its own side.
 MAX_STATE_BYTES=$((64 * 1024))
+# The fourth state line is the model the daemon matched. It is text this
+# script does not write, so it only replaces the generic name when it is
+# printable ASCII of at most 48 characters — anything else keeps TOOLTIP.
+MODEL_RE='^[A-Za-z0-9 ._()+/-]{1,48}$'
+# The ranges of MODEL_RE are byte ranges only under the C locale: under
+# en_US.UTF-8 `[A-Za-z]` also matches «é» or a fullwidth «Ａ», which is two
+# columns wide and breaks the frame. `local LC_ALL` pins the locale for this
+# check alone; bash re-reads it on assignment and restores it on return.
+is_plain_model() {  # is_plain_model TEXT
+    local LC_ALL=C
+    [[ "$1" =~ $MODEL_RE ]]
+}
 
 ICON="󰌌"
 ICON_CHARGING="󰌌 ⚡"
@@ -172,8 +184,13 @@ if ! _state=$(read_bounded "$STATE_FILE" "$MAX_STATE_BYTES"); then
     exit 0
 fi
 
-BATTERY=""; CONNECTED=""; CHARGING=""
-{ IFS= read -r BATTERY; IFS= read -r CONNECTED; IFS= read -r CHARGING; } <<< "$_state"
+BATTERY=""; CONNECTED=""; CHARGING=""; MODEL=""
+{ IFS= read -r BATTERY; IFS= read -r CONNECTED; IFS= read -r CHARGING; IFS= read -r MODEL; } <<< "$_state"
+# A three-line file (older daemon) leaves MODEL empty; a line that is not a
+# plain model name (markup, control bytes, a 64 KiB blob) is dropped the same
+# way. The slice bounds the regex before it runs.
+MODEL=${MODEL:0:64}
+is_plain_model "$MODEL" || MODEL=""
 
 # CONNECTED is the only connection flag: a 0% battery on a connected device
 # is a real critical reading, not an absent device.
@@ -228,7 +245,7 @@ else
     status=$(tip_c "$DIM" "$(printf '\U000F007E')  On battery")
 fi
 
-title=$(tip_bc "$ACCENT" "${ICON}  ${TOOLTIP}")
+title=$(tip_bc "$ACCENT" "${ICON}  ${MODEL:-$TOOLTIP}")
 row_bar="   ${gauge}  $(tip_bc "$BAR_COLOR" "${BATTERY}%")"
 row_status="   ${status}"
 

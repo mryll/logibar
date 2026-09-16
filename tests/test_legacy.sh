@@ -91,6 +91,51 @@ rm -f "$TMP/run/logibar/keyboard"
 checkeq "missing state file hides the module" '' "$(run_widget logibar-keyboard | jq -r .text)"
 set_state keyboard 77 1 0
 
+# ── model line ───────────────────────────────────────────────────────────────
+
+set_model() {  # set_model DEVICE BATTERY CONNECTED CHARGING MODEL
+    printf '%s\n%s\n%s\n%s' "$2" "$3" "$4" "$5" > "$TMP/run/logibar/$1"
+}
+set_model mouse 77 1 0 "G Pro Wireless"
+tip=$(run_widget logibar-mouse | jq -r .tooltip)
+check "the model line is the tooltip title" grep -q "G Pro Wireless" <<< "$tip"
+check "the generic name is gone when a model is present" bash -c '! grep -q "Logitech mouse" <<< "$1"' _ "$tip"
+set_state mouse 77 1 0
+check "a three-line file keeps the generic name" \
+    jq -e '.tooltip | test("Logitech mouse")' <<< "$(run_widget logibar-mouse)"
+set_model mouse 77 1 0 "<span>PRO</span> & *"
+out=$(run_widget logibar-mouse)
+check "a model with markup is valid JSON" jq -e . <<< "$out"
+check "a model with markup falls back to the generic name" \
+    jq -e '.tooltip | test("Logitech mouse") and (test("<span>PRO") | not)' <<< "$out"
+set_model keyboard 77 1 0 "G915 X TKL"
+check "the keyboard widget reads the model too" \
+    jq -e '.tooltip | test("G915 X TKL")' <<< "$(run_widget logibar-keyboard)"
+set_model headset 77 1 0 "PRO X 2 LIGHTSPEED"
+check "the headset widget reads the model too" \
+    jq -e '.tooltip | test("PRO X 2 LIGHTSPEED")' <<< "$(run_widget logibar-headset)"
+for i in 0 1 2; do
+    set_model "${DEVICES[$i]}" 77 1 0 "$(printf '%*s' 48 '' | tr ' ' 'M')"
+    check "${WIDGETS[$i]}: a 48-character model is accepted" \
+        jq -e '.tooltip | test("MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM")' <<< "$(run_widget "${WIDGETS[$i]}")"
+    set_model "${DEVICES[$i]}" 77 1 0 "$(printf '%*s' 49 '' | tr ' ' 'M')"
+    check "${WIDGETS[$i]}: a 49-character model keeps the generic name" \
+        jq -e '.tooltip | test("MMMM") | not' <<< "$(run_widget "${WIDGETS[$i]}")"
+    set_model "${DEVICES[$i]}" 77 1 0 "Souris Légère"
+    check "${WIDGETS[$i]}: a non-ASCII model keeps the generic name under en_US.UTF-8" \
+        jq -e '.tooltip | test("Légère") | not' <<< "$(LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 run_widget "${WIDGETS[$i]}")"
+    set_model "${DEVICES[$i]}" 77 1 0 "$(printf 'PRO \xef\xbc\xa1 2')"
+    check "${WIDGETS[$i]}: a fullwidth letter keeps the generic name under en_US.UTF-8" \
+        jq -e '.tooltip | test("Ａ") | not' <<< "$(LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 run_widget "${WIDGETS[$i]}")"
+    printf '77\n1\n0\nG\001Pro' > "$TMP/run/logibar/${DEVICES[$i]}"
+    check "${WIDGETS[$i]}: a control byte in the model keeps the generic name" \
+        jq -e '.tooltip | test("GPro|G.Pro") | not' <<< "$(run_widget "${WIDGETS[$i]}")"
+    printf '77\n1\n0\nPRO X (2) v1.0/B_+\nfifth' > "$TMP/run/logibar/${DEVICES[$i]}"
+    check "${WIDGETS[$i]}: punctuation is accepted and a fifth line is ignored" \
+        jq -e '.tooltip | test("PRO X \\(2\\) v1.0/B_\\+") and (test("fifth") | not)' <<< "$(run_widget "${WIDGETS[$i]}")"
+done
+set_state keyboard 77 1 0; set_state mouse 77 1 0; set_state headset 77 1 0
+
 # ── colors are resolved by logibar-status, not re-implemented ────────────────
 
 write_theme <<'EOF'

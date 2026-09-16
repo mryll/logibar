@@ -42,21 +42,21 @@
         "key": "showKeyboard",
         "type": "boolean",
         "label": "Show keyboard",
-        "description": "G915 TKL battery.",
+        "description": "Battery of the connected Logitech keyboard (G915 TKL, G915 X TKL). The panel names the model.",
         "defaultValue": true
       },
       {
         "key": "showMouse",
         "type": "boolean",
         "label": "Show mouse",
-        "description": "Supported Logitech mouse battery.",
+        "description": "Battery of the connected Logitech mouse (G Pro Wireless, PRO X Superlight, PRO X Superlight 2). The panel names the model.",
         "defaultValue": true
       },
       {
         "key": "showHeadset",
         "type": "boolean",
         "label": "Show headset",
-        "description": "PRO X 2 LIGHTSPEED battery.",
+        "description": "Battery of the PRO X 2 LIGHTSPEED headset.",
         "defaultValue": true
       }
     ]

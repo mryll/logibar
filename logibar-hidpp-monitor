@@ -40,14 +40,19 @@ EVENT_SWID = 0x00
 PROBE_RETRY_SECONDS = 5.0
 
 # Device configurations
-# (wireless_pid, wired_pid, name, waybar_signal)
+# (wireless_pid, wired_pid, name, waybar_signal, model)
+# `model` is the fourth line of the state file, so the frontends can name the
+# device that is actually paired instead of a generic "Logitech mouse". Keep
+# it to printable ASCII, 48 characters at most: the widgets treat the line as
+# foreign input and fall back to a generic name when it does not fit.
 DEVICES = [
-    (0xc539, 0xc088, "mouse", 10),     # G Pro Wireless
-    (0xc545, 0xc343, "keyboard", 9),   # G915 TKL
-    (0xc547, 0xc357, "keyboard", 9),   # G915 X TKL
-    (0xc547, 0xc094, "mouse", 10),     # PRO X Superlight
-    (0xc54d, 0xc09b, "mouse", 10),     # PRO X Superlight 2
+    (0xc539, 0xc088, "mouse", 10, "G Pro Wireless"),
+    (0xc545, 0xc343, "keyboard", 9, "G915 TKL"),
+    (0xc547, 0xc357, "keyboard", 9, "G915 X TKL"),
+    (0xc547, 0xc094, "mouse", 10, "PRO X Superlight"),
+    (0xc54d, 0xc09b, "mouse", 10, "PRO X Superlight 2"),
 ]
+MODEL_BY_PIDS = {(wireless, wired): model for wireless, wired, _, _, model in DEVICES}
 BATTERY_FEATURE_BY_RECEIVER = {
     0xc539: BATTERY_VOLTAGE_FEATURE,
     0xc545: BATTERY_VOLTAGE_FEATURE,
@@ -68,8 +73,8 @@ BATTERY_VOLTAGE_LEVELS = (
     (3500, 0),
 )
 SHARED_RECEIVER_PIDS = {
-    pid for pid, _, _, _ in DEVICES
-    if sum(device_pid == pid for device_pid, _, _, _ in DEVICES) > 1
+    pid for pid, _, _, _, _ in DEVICES
+    if sum(device_pid == pid for device_pid, _, _, _, _ in DEVICES) > 1
 }
 
 running = True
@@ -95,10 +100,13 @@ def write_state(name, battery, connected, charging, waybar_signal, state):
     try:
         with publish_lock:
             sources = source_states.setdefault(name, {})
-            sources[state['_source_id']] = (battery, connected, charging)
+            sources[state['_source_id']] = (battery, connected, charging, state.get('_model', ''))
             connected_sources = [source for source in sources.values() if source[1]]
-            selected = min(connected_sources, key=lambda source: source[0]) if connected_sources else (0, False, False)
-            new_state = f"{selected[0]}\n{1 if selected[1] else 0}\n{1 if selected[2] else 0}"
+            selected = min(connected_sources, key=lambda source: source[0]) if connected_sources else (0, False, False, '')
+            # Four lines: battery, connected, charging, model. The model is the
+            # one of the selected source, so a shared receiver names the device
+            # whose reading is shown. Nothing connected: no model either.
+            new_state = f"{selected[0]}\n{1 if selected[1] else 0}\n{1 if selected[2] else 0}\n{selected[3]}"
             if published_states.get(name) == new_state:
                 return
 
@@ -619,10 +627,13 @@ def monitor_wired(wired_pid, name, waybar_signal, battery_feature, state, state_
                     write_state(name, 0, False, False, waybar_signal, state)
             time.sleep(0.5)
 
-def monitor_device(wireless_pid, wired_pid, name, waybar_signal):
+def monitor_device(wireless_pid, wired_pid, name, waybar_signal, model=None):
     battery_feature = BATTERY_FEATURE_BY_RECEIVER.get(wireless_pid, UNIFIED_BATTERY_FEATURE)
+    if model is None:
+        model = MODEL_BY_PIDS.get((wireless_pid, wired_pid), '')
     state = {
         '_source_id': (wireless_pid, wired_pid),
+        '_model': model,
         'wireless_connected': False,
         'wired_connected': False,
         'wired_just_disconnected': False,
@@ -649,8 +660,8 @@ def main():
     os.makedirs(STATE_DIR, exist_ok=True, mode=0o700)
 
     threads = []
-    for wireless_pid, wired_pid, name, waybar_signal in DEVICES:
-        threads.extend(monitor_device(wireless_pid, wired_pid, name, waybar_signal))
+    for wireless_pid, wired_pid, name, waybar_signal, model in DEVICES:
+        threads.extend(monitor_device(wireless_pid, wired_pid, name, waybar_signal, model))
 
     while running:
         time.sleep(1)

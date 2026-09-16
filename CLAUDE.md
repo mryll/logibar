@@ -19,6 +19,6 @@
 - The three widget scripts are near-identical — only `ICON`, `ICON_CHARGING`, `TOOLTIP`, and `STATE_FILE` differ. Keep them in sync when changing shared logic
 - Widget output uses Pango markup inside JSON (`<span>` tags) — Waybar renders it
 - Daemons notify Waybar via `pkill -RTMIN+N waybar` — signal numbers are hardcoded per device and must match waybar config
-- State files are 3 lines: `battery\nconnected\ncharging` in `$XDG_RUNTIME_DIR/logibar/`
+- State files are 4 lines: `battery\nconnected\ncharging\nmodel` in `$XDG_RUNTIME_DIR/logibar/`. A 3-line file (older daemon) is valid: the widgets fall back to the generic `DEVICE_NAME`/`TOOLTIP`. The model line is foreign input: accepted only as `[A-Za-z0-9 ._()+/-]{1,48}` (`MODEL_RE`, checked by `is_plain_model` under `local LC_ALL=C` — under a UTF-8 locale the ranges would match «é»), never escaped into the tooltip; a NUL byte is dropped by the shell before the check
 - Python dependency is the Cython hidapi binding (`import hid` with `hid.device`), packaged as `python-hidapi` on Arch / `hidapi` on pip — NOT `python-hid`/`hid`, an incompatible binding that claims the same module name and makes the daemons fail silently
 

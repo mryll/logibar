@@ -172,6 +172,66 @@ check "waybar class reflects severity" jq -e '.class == "warning"' <<< "$out"
 check "waybar tooltip lists every connected device" \
     jq -e '.tooltip | test("G915") and test("Logitech mouse") and test("PRO X 2")' <<< "$out"
 
+# ── model line: the fourth line names the device ─────────────────────────────
+
+set_model() {  # set_model DEVICE BATTERY CONNECTED CHARGING MODEL
+    mkdir -p "$TMP/run/logibar"
+    printf '%s\n%s\n%s\n%s' "$2" "$3" "$4" "$5" > "$TMP/run/logibar/$1"
+}
+clear_states
+set_model keyboard 90 1 0 "G915 X TKL"
+set_model mouse 30 1 0 "PRO X Superlight 2"
+set_state headset 12 1 0
+out=$(run_status --json)
+check "the model line is the JSON name" \
+    jq -e '(.devices[] | select(.id == "mouse") | .name) == "PRO X Superlight 2"' <<< "$out"
+check "a keyboard model reaches the JSON too" \
+    jq -e '(.devices[] | select(.id == "keyboard") | .name) == "G915 X TKL"' <<< "$out"
+check "a three-line file keeps the generic name" \
+    jq -e '(.devices[] | select(.id == "headset") | .name) == "PRO X 2 Headset"' <<< "$out"
+out=$(run_status)
+check "the tooltip shows the model, not the generic name" \
+    jq -e '.tooltip | test("PRO X Superlight 2") and test("G915 X TKL") and (test("Logitech mouse") | not)' <<< "$out"
+set_model mouse 30 1 0 "<b>PRO</b> &amp; *"
+out=$(run_status --json)
+check "a model with markup is valid JSON" jq -e '.schema_version == 1' <<< "$out"
+check "a model with markup falls back to the generic name" \
+    jq -e '(.devices[] | select(.id == "mouse") | .name) == "Logitech mouse"' <<< "$out"
+check "a model with markup never reaches the tooltip" \
+    jq -e '.tooltip | test("<b>") | not' <<< "$(run_status)"
+set_model mouse 30 1 0 "$(printf '%*s' 49 '' | tr ' ' 'M')"
+check "a 49-character model is too long: generic name" \
+    jq -e '(.devices[] | select(.id == "mouse") | .name) == "Logitech mouse"' <<< "$(run_status --json)"
+set_model mouse 30 1 0 "$(printf '%*s' 48 '' | tr ' ' 'M')"
+check "a 48-character model is accepted" \
+    jq -e '(.devices[] | select(.id == "mouse") | .name | length) == 48' <<< "$(run_status --json)"
+set_model mouse 30 1 0 ""
+check "an empty model line keeps the generic name" \
+    jq -e '(.devices[] | select(.id == "mouse") | .name) == "Logitech mouse"' <<< "$(run_status --json)"
+set_model mouse 30 1 0 "PRO X (2) v1.0/B_+"
+check "the allowed punctuation ._()+/- is accepted" \
+    jq -e '(.devices[] | select(.id == "mouse") | .name) == "PRO X (2) v1.0/B_+"' <<< "$(run_status --json)"
+printf '30\n1\n0\nPRO X Superlight\nfifth line\n' > "$TMP/run/logibar/mouse"
+check "a fifth line is ignored" \
+    jq -e '(.devices[] | select(.id == "mouse") | .name) == "PRO X Superlight"' <<< "$(run_status --json)"
+# Under a UTF-8 locale the ranges of the allow-list would also match «é»;
+# the check pins the C locale, so the accent keeps the generic name.
+set_model mouse 30 1 0 "Souris Légère"
+check "a non-ASCII model keeps the generic name under en_US.UTF-8" \
+    jq -e '(.devices[] | select(.id == "mouse") | .name) == "Logitech mouse"' \
+    <<< "$(LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 run_status --json)"
+check "a non-ASCII model keeps the generic name under C.UTF-8" \
+    jq -e '(.devices[] | select(.id == "mouse") | .name) == "Logitech mouse"' \
+    <<< "$(LANG=C.UTF-8 LC_ALL=C.UTF-8 run_status --json)"
+set_model mouse 30 1 0 "$(printf 'PRO \xef\xbc\xa1 2')"   # fullwidth Ａ, two columns wide
+check "a fullwidth letter keeps the generic name under en_US.UTF-8" \
+    jq -e '(.devices[] | select(.id == "mouse") | .name) == "Logitech mouse"' \
+    <<< "$(LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 run_status --json)"
+set_model keyboard 90 1 0 "G915 X TKL"
+check "a plain model is still accepted under en_US.UTF-8" \
+    jq -e '(.devices[] | select(.id == "keyboard") | .name) == "G915 X TKL"' \
+    <<< "$(LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 run_status --json)"
+
 # ── argument errors: exit 0 with a structured document ───────────────────────
 
 out=$(run_status --json --devices nope); rc=$?
