@@ -411,8 +411,8 @@ An error is also a JSON document, with an `error` field and the same exit code 0
 ```
 
 1. The **daemons** run as systemd user services and monitor the HID devices.
-2. The daemon writes each change to a **state file** in `$XDG_RUNTIME_DIR/logibar/`, in 3 lines: `battery`, `connected`, `charging`. Each of these operations is atomic, so a reader never gets half of a file.
-3. **`logibar-status`** reads these files. It selects the worst device, applies the thresholds, finds the colors, and prints the result.
+2. The daemon writes each change to a **state file** in `$XDG_RUNTIME_DIR/logibar/`, in 4 lines: `battery`, `connected`, `charging`, `model`. Each of these operations is atomic, so a reader never gets half of a file. The `model` line is the entry of the device table that answered (`G Pro Wireless`, `G915 X TKL`, ...); when nothing is connected it is empty. A state file with 3 lines, from an older daemon, is still valid: the widgets then show a generic name.
+3. **`logibar-status`** reads these files. It selects the worst device, applies the thresholds, finds the colors, and prints the result. The `model` line becomes the device name in the tooltip, in the JSON (`devices[].name`) and in the Omarchy panel. The widgets accept a model only as ASCII letters, digits, space and `._()+/-`, 1 to 48 characters; any other line (accents, markup, control bytes, a longer name) keeps the generic name, so a file that the widget does not write cannot put markup into the tooltip. A NUL byte is dropped by the shell before the check. The name is the table entry for the receiver that answered: the LIGHTSPEED receivers `c539` and `c547` are shared by several mice, so a mouse that is not in the table shows the name of the entry that matched its receiver (reading the device's own name through HID++ DEVICE_NAME, `0x0005`, is the follow-up that removes that limit).
 4. For Waybar, the daemons also send `SIGRTMIN+N`. For the Omarchy shell, the plugin monitors the files and runs `logibar-status` again after each change.
 
 ### Keyboard and mouse: HID++ 2.0
@@ -478,24 +478,24 @@ To add another Logitech device to the keyboard and mouse daemon:
    lsusb | grep 046d
    ```
 
-2. Add a line to the `DEVICES` list in `logibar-hidpp-monitor`:
+2. Add a line to the `DEVICES` list in `logibar-hidpp-monitor`. The last field is the model name the widgets show: ASCII letters, digits, space and `._()+/-` only, 1 to 48 characters (`make test` checks it):
 
    ```python
    DEVICES = [
-       (0xc539, 0xc088, "mouse", 10),     # G Pro Wireless
-       (0xc545, 0xc343, "keyboard", 9),   # G915 TKL
-       (0xc547, 0xc357, "keyboard", 9),   # G915 X TKL
-       (0xc547, 0xc094, "mouse", 10),     # PRO X Superlight
-       (0xc54d, 0xc09b, "mouse", 10),     # PRO X Superlight 2
-       (0xNEW1, 0xNEW2, "newdevice", 11), # Your device
+       (0xc539, 0xc088, "mouse", 10, "G Pro Wireless"),
+       (0xc545, 0xc343, "keyboard", 9, "G915 TKL"),
+       (0xc547, 0xc357, "keyboard", 9, "G915 X TKL"),
+       (0xc547, 0xc094, "mouse", 10, "PRO X Superlight"),
+       (0xc54d, 0xc09b, "mouse", 10, "PRO X Superlight 2"),
+       (0xNEW1, 0xNEW2, "newdevice", 11, "Your device"),
    ]
    ```
 
    Devices use UNIFIED_BATTERY (`0x1004`) by default. If the device instead exposes BATTERY_VOLTAGE (`0x1001`), add its receiver PID to `BATTERY_FEATURE_BY_RECEIVER`.
 
-3. Add the device to `DEVICE_IDS`, `DEVICE_ICON` and `DEVICE_NAME` in `logibar-status`.
+3. Add the device to `DEVICE_IDS`, `DEVICE_ICON` and `DEVICE_NAME` in `logibar-status`. `DEVICE_NAME` is only the generic fallback for a state file without a model line; the name on screen comes from the daemon.
 
-4. To make a module for one device, copy `logibar-keyboard`, then set new values for `ICON`, `TOOLTIP` and `STATE_FILE`. Give the new Waybar module the same signal number as the daemon.
+4. To make a module for one device, copy `logibar-keyboard`, then set new values for `ICON`, `TOOLTIP` (the generic fallback) and `STATE_FILE`. Give the new Waybar module the same signal number as the daemon.
 
 5. Add an emulated sheet for the device to `EMULATED_SHEETS` in `tests/test_hidpp_monitor.py` — `make test` fails until every entry of `DEVICES` has one. Test with your physical hardware too: the sheet protects the device on FUTURE refactors of the daemon (the maintainer does not own every supported device), but it can only prove that the daemon honors what the sheet declares — it cannot prove that the sheet matches the real device.
 
