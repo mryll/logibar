@@ -475,6 +475,15 @@ class StateAggregationTests(unittest.TestCase):
 
 
 class BatteryVoltageTests(unittest.TestCase):
+    def test_g_pro_wireless_captured_battery_report(self):
+        # Captured from receiver 046d:c539, paired device index 1.
+        # Feature 0x1001 resolves to index 6; 0x1000 and 0x1004 are absent.
+        report = bytes.fromhex("11 01 06 0d 0e 90 00 00 00 00 00 00 00 00 00 00 00 00 00 00")
+        self.assertEqual(
+            monitor.decode_battery_report(monitor.BATTERY_VOLTAGE_FEATURE, report),
+            (23, False),
+        )
+
     def test_g915_tkl_uses_battery_voltage(self):
         self.assertIn((0xC545, 0xC343, "keyboard", 9), monitor.DEVICES)
         self.assertEqual(
@@ -673,6 +682,69 @@ class ForeignResponseTests(unittest.TestCase):
 
 
 class BusIntegrationTests(unittest.TestCase):
+    def test_g_pro_wireless_voltage_updates_and_sleep_wake(self):
+        bus = FakeHidBus([
+            FakeNode(b"/dev/gpro", 0xC539, FakePairedDevice(
+                kind=0x03, battery_feature=BATTERY_VOLTAGE_FEATURE,
+                voltage=3728, battery_index=0x06)),
+        ])
+        with DaemonHarness(bus) as harness:
+            # Use the production entry point so this also exercises the PID
+            # table's battery-feature selection, not a test-supplied feature.
+            harness.threads.extend(harness.module.monitor_device(0xC539, 0xC088, "mouse", 10))
+            harness.wait_for_state("mouse", "23\n1\n0")
+            bus.emit_battery_event(b"/dev/gpro", voltage=3833, charging=True)
+            harness.wait_for_state("mouse", "55\n1\n1")
+            bus.emit_link(b"/dev/gpro", off=True)
+            harness.wait_for_state("mouse", "0\n0\n0")
+            bus.emit_link(b"/dev/gpro", off=False)
+            harness.wait_for_state("mouse", "55\n1\n1")
+            report = harness.stop()
+            self.assertEqual(report["alive"], [])
+            self.assertEqual(report["protocol_errors"], [])
+
+    def test_a_c539_mouse_without_battery_voltage_publishes_nothing(self):
+        # Receiver 0xC539 is shared by other LIGHTSPEED mice. One that lacks
+        # feature 0x1001 answers the lookup with index 0, so the daemon must
+        # stay silent: no state file, no protocol error, no crash.
+        bus = FakeHidBus([
+            FakeNode(b"/dev/other", 0xC539, FakePairedDevice(
+                kind=0x03, battery_feature=UNIFIED_BATTERY_FEATURE, battery=60)),
+        ])
+        with DaemonHarness(bus) as harness:
+            harness.threads.extend(harness.module.monitor_device(0xC539, 0xC088, "mouse", 10))
+            # Wait for the daemon to ask ROOT for 0x1001 on this node, so the
+            # assertion below runs after the lookup was answered, not before.
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if any(kind == "write" and path == b"/dev/other"
+                       and req[0] == 0x10 and req[2] == 0x00 and req[4:6] == b"\x10\x01"
+                       for kind, _, path, _, req in bus.log):
+                    break
+                time.sleep(0.02)
+            else:
+                self.fail("the daemon never looked up feature 0x1001")
+            time.sleep(0.3)
+            self.assertFalse(harness.state_file("mouse").exists())
+            report = harness.stop()
+            self.assertEqual(report["alive"], [])
+            self.assertEqual(report["protocol_errors"], [])
+
+    def test_g_pro_wired_voltage_updates(self):
+        bus = FakeHidBus([
+            FakeNode(b"/dev/gpro-wired", 0xC088, FakePairedDevice(
+                kind=0x03, battery_feature=BATTERY_VOLTAGE_FEATURE,
+                voltage=3833, charging=True, battery_index=0x06), device_idx=0xFF),
+        ])
+        with DaemonHarness(bus) as harness:
+            harness.threads.extend(harness.module.monitor_device(0xC539, 0xC088, "mouse", 10))
+            harness.wait_for_state("mouse", "55\n1\n1")
+            bus.emit_battery_event(b"/dev/gpro-wired", voltage=4186, charging=False)
+            harness.wait_for_state("mouse", "100\n1\n0")
+            report = harness.stop()
+            self.assertEqual(report["alive"], [])
+            self.assertEqual(report["protocol_errors"], [])
+
     def test_each_shared_receiver_publishes_its_own_battery(self):
         bus = FakeHidBus([
             FakeNode(b"/dev/kbd", 0xC547,
@@ -770,6 +842,9 @@ class SleepingReceiverTests(unittest.TestCase):
 
 class DeviceCoverageTests(unittest.TestCase):
     EMULATED_SHEETS = {
+        (0xC539, 0xC088): ("mouse", 10, FakePairedDevice(
+            kind=0x03, battery_feature=BATTERY_VOLTAGE_FEATURE,
+            voltage=3728, battery_index=0x06)),
         (0xC545, 0xC343): ("keyboard", 9, FakePairedDevice(
             kind=0x00, battery_feature=BATTERY_VOLTAGE_FEATURE, voltage=3833)),
         (0xC547, 0xC357): ("keyboard", 9, FakePairedDevice(
@@ -787,10 +862,14 @@ class DeviceCoverageTests(unittest.TestCase):
         for pids, (name, signal) in declared.items():
             self.assertEqual((name, signal), self.EMULATED_SHEETS[pids][:2])
 
-    def test_only_the_g915_tkl_reports_voltage(self):
-        self.assertEqual(set(monitor.BATTERY_FEATURE_BY_RECEIVER), {0xC545})
+    def test_g915_tkl_and_g_pro_wireless_report_voltage(self):
+        self.assertEqual(set(monitor.BATTERY_FEATURE_BY_RECEIVER), {0xC545, 0xC539})
         self.assertEqual(
             self.EMULATED_SHEETS[(0xC545, 0xC343)][2].battery_feature,
+            0x1001,
+        )
+        self.assertEqual(
+            self.EMULATED_SHEETS[(0xC539, 0xC088)][2].battery_feature,
             0x1001,
         )
 

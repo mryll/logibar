@@ -42,12 +42,14 @@ PROBE_RETRY_SECONDS = 5.0
 # Device configurations
 # (wireless_pid, wired_pid, name, waybar_signal)
 DEVICES = [
+    (0xc539, 0xc088, "mouse", 10),     # G Pro Wireless
     (0xc545, 0xc343, "keyboard", 9),   # G915 TKL
     (0xc547, 0xc357, "keyboard", 9),   # G915 X TKL
     (0xc547, 0xc094, "mouse", 10),     # PRO X Superlight
     (0xc54d, 0xc09b, "mouse", 10),     # PRO X Superlight 2
 ]
 BATTERY_FEATURE_BY_RECEIVER = {
+    0xc539: BATTERY_VOLTAGE_FEATURE,
     0xc545: BATTERY_VOLTAGE_FEATURE,
 }
 BATTERY_VOLTAGE_LEVELS = (

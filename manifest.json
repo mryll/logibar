@@ -49,7 +49,7 @@
         "key": "showMouse",
         "type": "boolean",
         "label": "Show mouse",
-        "description": "PRO X Superlight battery.",
+        "description": "Supported Logitech mouse battery.",
         "defaultValue": true
       },
       {

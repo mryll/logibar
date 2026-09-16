@@ -170,7 +170,7 @@ check "waybar keys present" \
 check "waybar percentage is the worst battery" jq -e '.percentage == 12' <<< "$out"
 check "waybar class reflects severity" jq -e '.class == "warning"' <<< "$out"
 check "waybar tooltip lists every connected device" \
-    jq -e '.tooltip | test("G915") and test("PRO X Superlight") and test("PRO X 2")' <<< "$out"
+    jq -e '.tooltip | test("G915") and test("Logitech mouse") and test("PRO X 2")' <<< "$out"
 
 # ── argument errors: exit 0 with a structured document ───────────────────────
 

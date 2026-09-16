@@ -42,6 +42,7 @@ The same core drives both frontends, so a number reads the same on either one:
 |---|---|---|
 | G915 TKL | Keyboard | `logibar-hidpp-monitor` |
 | G915 X TKL | Keyboard | `logibar-hidpp-monitor` |
+| G Pro Wireless | Mouse | `logibar-hidpp-monitor` |
 | PRO X Superlight | Mouse | `logibar-hidpp-monitor` |
 | PRO X Superlight 2 | Mouse | `logibar-hidpp-monitor` |
 | PRO X 2 LIGHTSPEED | Headset | `logibar-headset-monitor` |
@@ -439,7 +440,9 @@ Response: [0x11, device_idx, feature_index, 0x1d, SoC, level, status, ...]
 
 Byte 3 of a request is `(function << 4) | software_id`. hidraw copies every response to every open descriptor on a node, so each requester in the daemon signs with its own software ID (`0xD` for the battery monitors, `0xE` for the device-kind probe) and accepts only a response with its full echo. Broadcast events carry software ID `0`.
 
-The G915 TKL instead exposes BATTERY_VOLTAGE (`0x1001`). Its query is function 0 (request byte `0x0d`), and the response contains a two-byte millivolt reading and charging flags. Logibar converts that voltage to a percentage using the same discharge curve as Solaar. A drained cell converts to `0%`, which the widgets show as a critical reading — only `connected` decides visibility.
+The G915 TKL and G Pro Wireless instead expose BATTERY_VOLTAGE (`0x1001`). Its query is function 0 (request byte `0x0d`), and the response contains a two-byte millivolt reading and charging flags. Logibar converts that voltage to a percentage using the same discharge curve as Solaar. A drained cell converts to `0%`, which the widgets show as a critical reading — only `connected` decides visibility.
+
+Receiver `c539` is the LIGHTSPEED receiver of several other mice (G403, G703, G903, G502 LIGHTSPEED). The daemon does not check which mouse is paired: the G Pro Wireless is the model verified on hardware. A mouse without BATTERY_VOLTAGE answers the feature lookup with index 0, so the daemon publishes no reading.
 
 After the first request, the daemon blocks on the device with a timeout of one second. The receiver sends a message after each change of the state:
 
@@ -479,6 +482,7 @@ To add another Logitech device to the keyboard and mouse daemon:
 
    ```python
    DEVICES = [
+       (0xc539, 0xc088, "mouse", 10),     # G Pro Wireless
        (0xc545, 0xc343, "keyboard", 9),   # G915 TKL
        (0xc547, 0xc357, "keyboard", 9),   # G915 X TKL
        (0xc547, 0xc094, "mouse", 10),     # PRO X Superlight
