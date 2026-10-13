@@ -3,6 +3,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // Logitech battery panel. Owns the `logibar-status --json` data (one source
@@ -46,10 +47,10 @@ Panel {
   // reference for a card, and a theme that defines popups.text separately would
   // be ignored outright. (printbar already did this; the rest of the family now
   // agrees.)
-  readonly property color foreground: Color.popups.text
-  readonly property color urgent: bar ? bar.urgent : Color.urgent
+  readonly property color foreground: Commons.Color.popups.text
+  readonly property color urgent: bar ? bar.urgent : Commons.Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.55)
-  readonly property color track: Style.selectedFillFor(foreground, Color.accent, urgent)
+  readonly property color track: Style.selectedFillFor(foreground, Commons.Color.accent, urgent)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property bool vertical: bar ? bar.vertical : false
 
@@ -128,7 +129,7 @@ Panel {
   // "panel-only" can disagree about the very same percentage.
   function panelRamp(pct) { return panelColored ? scaleColor(pct) : foreground }
   function barRamp(pct) {
-    var base = bar ? bar.barForeground : Color.foreground
+    var base = bar ? bar.barForeground : Commons.Color.foreground
     return barColored ? legibleOnBar(scaleColor(pct)) : base
   }
 
@@ -146,7 +147,7 @@ Panel {
   // pills, the status label and the error card, and letting the identity mark
   // move too means the panel has no fixed point a reader can recognise. Pure
   // theme accent (foreground when the panel is monochrome).
-  readonly property color brandColor: panelColored ? Color.accent : foreground
+  readonly property color brandColor: panelColored ? Commons.Color.accent : foreground
 
   // ---------------------------------------------------------------- meter ramp
 
@@ -253,8 +254,8 @@ Panel {
   // 4.5:1 against the bar background. Normally a no-op: the palette tones
   // clear the ratio on their own.
   function legibleOnBar(c) {
-    var bg = bar ? bar.background : Color.bar.background
-    var safe = bar ? bar.barForeground : Color.foreground
+    var bg = bar ? bar.background : Commons.Color.bar.background
+    var safe = bar ? bar.barForeground : Commons.Color.foreground
     var out = c
     for (var i = 0; i < 12 && contrastRatio(out, bg) < 4.5; i++)
       out = mix(out, safe, 0.2)
@@ -290,7 +291,7 @@ Panel {
   // Glyph and number share this one color, so the bar element reads as a
   // single unit — and it is the ramp color at the very percentage shown.
   readonly property color barColor: {
-    var base = bar ? bar.barForeground : Color.foreground
+    var base = bar ? bar.barForeground : Commons.Color.foreground
     if (!hasData || !aggregate || aggregate.worst_battery === null) return base
     return barRamp(aggregate.worst_battery)
   }

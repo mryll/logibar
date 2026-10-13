@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // Omarchy shell bar widget for logibar. Thin host following the first-party
@@ -89,7 +90,7 @@ BarWidget {
     bar: root.bar
     text: root.faceText
     foreground: root.panelItem ? root.panelItem.barColor
-      : (root.bar ? root.bar.barForeground : Color.foreground)
+      : (root.bar ? root.bar.barForeground : Commons.Color.foreground)
     // Dim ONLY when there is no value to show. A failed poll behind good data
     // used to drop the whole face to 45% opacity, which restated the error in
     // the same channel the battery ramp already uses — the percentage read as a
