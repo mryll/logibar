@@ -176,6 +176,8 @@ def hidraw_fingerprint():
         return None
 
 def safe_enumerate(vid, pid):
+    """The cached HID++ nodes of exactly `pid`. Unlike hid.enumerate, a pid
+    of 0 matches nothing here; no caller needs "any product"."""
     with hid_lock:
         key = hidraw_fingerprint()
         now = time.monotonic()
