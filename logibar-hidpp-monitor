@@ -600,10 +600,21 @@ def handle_wireless_report(r, dev, device_idx, name, waybar_signal, battery_feat
     # Battery broadcast event (long HID++ 0x11)
     handle_battery_broadcast(r, device_idx, name, waybar_signal, battery_feature, state, state_lock)
 
+# A battery query that gets no answer is tried again after this delay, which
+# doubles up to the cap. Without it, a reply lost at startup left the widget
+# hidden: battery events need the feature index that only a query resolves.
+REQUERY_FIRST_DELAY = 2.0
+REQUERY_MAX_DELAY = 60.0
+
+def next_requery_delay(delay):
+    return min(delay * 2, REQUERY_MAX_DELAY)
+
 def monitor_wireless(wireless_pid, name, waybar_signal, battery_feature, state, state_lock):
     device_idx = 0x01
     dev = None
     opened = None  # (path, serial) of the open receiver
+    requery_at = None  # monotonic time of the next retry, None while not needed
+    requery_delay = REQUERY_FIRST_DELAY
 
     while running:
         with state_lock:
@@ -650,10 +661,20 @@ def monitor_wireless(wireless_pid, name, waybar_signal, battery_feature, state, 
                     opened = None
                     time.sleep(0.5)
                     continue
+                requery_delay = REQUERY_FIRST_DELAY
+                requery_at = None if queried else time.monotonic() + requery_delay
 
             if consume_wired_disconnect(state, state_lock):
                 enable_notifications(dev)
-                requery_wireless_battery(dev, device_idx, name, waybar_signal, battery_feature, state, state_lock)
+                queried = requery_wireless_battery(dev, device_idx, name, waybar_signal, battery_feature, state, state_lock)
+                requery_delay = REQUERY_FIRST_DELAY
+                requery_at = None if queried else time.monotonic() + requery_delay
+            elif requery_at is not None and time.monotonic() >= requery_at:
+                if requery_wireless_battery(dev, device_idx, name, waybar_signal, battery_feature, state, state_lock):
+                    requery_at = None
+                else:
+                    requery_delay = next_requery_delay(requery_delay)
+                    requery_at = time.monotonic() + requery_delay
 
             # Blocking read with timeout - true event-driven
             r = dev.read(64, timeout_ms=1000)

@@ -1186,6 +1186,32 @@ class BusIntegrationTests(unittest.TestCase):
             report = harness.stop()
             self.assertEqual(report["protocol_errors"], [])
 
+    def test_a_lost_startup_reply_is_queried_again(self):
+        # With no cable there is no periodic requery any more, so a battery
+        # reply lost at startup must be retried, or the widget stays hidden:
+        # battery events need the feature index that only a query resolves.
+        device = FakePairedDevice(kind=0x03, battery=50)
+        bus = FakeHidBus([FakeNode(b"/dev/sl2", 0xC54D, device)])
+        bus.intercept_next(
+            b"/dev/sl2",
+            lambda cmd: cmd[0] == 0x11 and cmd[2] == device.battery_index,
+            lambda _request, _reply: [])
+        with DaemonHarness(bus) as harness:
+            harness.start_device(0xC54D, 0xC09B, "mouse", 10)
+            harness.wait_for_state("mouse", "50\n1\n0\n", timeout=8.0)
+            bus.emit_battery_event(b"/dev/sl2", battery=49)
+            harness.wait_for_state("mouse", "49\n1\n0\n")
+            report = harness.stop()
+            self.assertEqual(report["protocol_errors"], [])
+
+    def test_the_retry_delay_doubles_up_to_its_cap(self):
+        monitor = load_monitor_module(FakeHidBus([]))
+        delays = [monitor.REQUERY_FIRST_DELAY]
+        for _ in range(8):
+            delays.append(monitor.next_requery_delay(delays[-1]))
+        self.assertEqual(delays[:3], [2.0, 4.0, 8.0])
+        self.assertEqual(delays[-1], monitor.REQUERY_MAX_DELAY)
+
     def test_no_cable_never_flags_a_cable_disconnect(self):
         bus = FakeHidBus([])
         with DaemonHarness(bus) as harness:
