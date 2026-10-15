@@ -91,6 +91,27 @@ rm -f "$TMP/run/logibar/keyboard"
 checkeq "missing state file hides the module" '' "$(run_widget logibar-keyboard | jq -r .text)"
 set_state keyboard 77 1 0
 
+# ── battery line: only a plain percentage is a reading ───────────────────────
+
+for i in 0 1 2; do
+    for _bad in 150 101 1000 -1 '' abc ' 7' '7 ' 7.5 0x10 '٣'; do
+        set_state "${DEVICES[$i]}" "$_bad" 1 0
+        out=$(run_widget "${WIDGETS[$i]}" 2>/dev/null)
+        rc=$?
+        checkeq "${WIDGETS[$i]}: battery '$_bad' exits 0" 0 "$rc"
+        checkeq "${WIDGETS[$i]}: battery '$_bad' hides the module" '' "$(jq -r .text <<< "$out")"
+    done
+    set_state "${DEVICES[$i]}" 100 1 0
+    check "${WIDGETS[$i]}: 100% is a reading" \
+        jq -e '(.text | test("100%")) and .percentage == 100' <<< "$(run_widget "${WIDGETS[$i]}")"
+    # A leading zero is decimal, not bad octal: 08 is a critical 8%.
+    set_state "${DEVICES[$i]}" 08 1 0
+    out=$(run_widget "${WIDGETS[$i]}" 2>&1)
+    check "${WIDGETS[$i]}: battery 08 is a critical 8%" \
+        jq -e '(.text | test(">8%<")) and .class == "critical" and .percentage == 8' <<< "$out"
+    set_state "${DEVICES[$i]}" 77 1 0
+done
+
 # ── model line ───────────────────────────────────────────────────────────────
 
 set_model() {  # set_model DEVICE BATTERY CONNECTED CHARGING MODEL

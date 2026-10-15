@@ -1137,12 +1137,14 @@ class BusIntegrationTests(unittest.TestCase):
                      serial="M1"),
         ])
         with DaemonHarness(bus) as harness:
-            # The wireless monitor alone: with no cable node, the wired
-            # monitor flags a cable disconnect on every pass, and the
-            # requery that follows can swallow the link events below.
+            # Both monitors, as in production: with no cable node the wired
+            # monitor must stay silent, or its requeries swallow the link
+            # events below.
             state = harness._fresh_state(0xC547, 0xC094)
             state['_model'] = "PRO X Superlight"
-            harness.start_wireless(0xC547, "mouse", 10, state=state)
+            lock = threading.Lock()
+            harness.start_wireless(0xC547, "mouse", 10, state=state, state_lock=lock)
+            harness.start_wired(0xC094, "mouse", 10, state=state, state_lock=lock)
             harness.wait_for_state("mouse", "41\n1\n0\nPRO X Superlight")
             harness.wait_for_open(b"/dev/mouse")
 
@@ -1157,6 +1159,135 @@ class BusIntegrationTests(unittest.TestCase):
             bus.nodes[b"/dev/mouse"].device.wpid = 0x4093
             bus.emit_link(b"/dev/mouse", off=False)
             harness.wait_for_state("mouse", "41\n1\n0\nPRO X Superlight")
+            report = harness.stop()
+            self.assertEqual(report["protocol_errors"], [])
+
+    def test_with_no_cable_the_receiver_hears_nothing_after_startup(self):
+        # The wired monitor polls every 0.5 s while no cable is plugged. A
+        # cable that was never there is not a cable that was unplugged: the
+        # receiver must not be re-armed and re-queried on every pass.
+        bus = FakeHidBus([
+            FakeNode(b"/dev/sl2", 0xC54D,
+                     FakePairedDevice(kind=0x03, battery=50)),
+        ])
+        with DaemonHarness(bus) as harness:
+            harness.start_device(0xC54D, 0xC09B, "mouse", 10)
+            harness.wait_for_state("mouse", "50\n1\n0\n")
+            harness.wait_for_open(b"/dev/sl2")
+            time.sleep(0.3)  # let the startup cycle finish its reads
+
+            def receiver_writes():
+                return [entry for entry in bus.log
+                        if entry[0] == "write" and entry[2] == b"/dev/sl2"]
+
+            before = len(receiver_writes())
+            time.sleep(2.5)
+            self.assertEqual(receiver_writes()[before:], [])
+            report = harness.stop()
+            self.assertEqual(report["protocol_errors"], [])
+
+    def test_a_lost_startup_reply_is_queried_again(self):
+        # With no cable there is no periodic requery any more, so a battery
+        # reply lost at startup must be retried, or the widget stays hidden:
+        # battery events need the feature index that only a query resolves.
+        device = FakePairedDevice(kind=0x03, battery=50)
+        bus = FakeHidBus([FakeNode(b"/dev/sl2", 0xC54D, device)])
+        bus.intercept_next(
+            b"/dev/sl2",
+            lambda cmd: cmd[0] == 0x11 and cmd[2] == device.battery_index,
+            lambda _request, _reply: [])
+        with DaemonHarness(bus) as harness:
+            harness.start_device(0xC54D, 0xC09B, "mouse", 10)
+            harness.wait_for_state("mouse", "50\n1\n0\n", timeout=8.0)
+            bus.emit_battery_event(b"/dev/sl2", battery=49)
+            harness.wait_for_state("mouse", "49\n1\n0\n")
+            report = harness.stop()
+            self.assertEqual(report["protocol_errors"], [])
+
+    def test_a_lost_reply_after_a_wake_is_queried_again(self):
+        device = FakePairedDevice(kind=0x03, battery=50)
+        bus = FakeHidBus([FakeNode(b"/dev/sl2", 0xC54D, device)])
+        with DaemonHarness(bus) as harness:
+            harness.start_device(0xC54D, 0xC09B, "mouse", 10)
+            harness.wait_for_state("mouse", "50\n1\n0\n")
+            harness.wait_for_open(b"/dev/sl2")
+            bus.emit_link(b"/dev/sl2", off=True)
+            harness.wait_for_state("mouse", "0\n0\n0\n")
+            bus.intercept_next(
+                b"/dev/sl2",
+                lambda cmd: cmd[0] == 0x11 and cmd[2] == device.battery_index,
+                lambda _request, _reply: [])
+            bus.emit_link(b"/dev/sl2", off=False)
+            harness.wait_for_state("mouse", "50\n1\n0\n", timeout=8.0)
+            report = harness.stop()
+            self.assertEqual(report["protocol_errors"], [])
+
+    def test_the_retry_delay_doubles_up_to_its_cap(self):
+        monitor = load_monitor_module(FakeHidBus([]))
+        delays = [monitor.REQUERY_FIRST_DELAY]
+        for _ in range(8):
+            delays.append(monitor.next_requery_delay(delays[-1]))
+        self.assertEqual(delays[:3], [2.0, 4.0, 8.0])
+        self.assertEqual(delays[-1], monitor.REQUERY_MAX_DELAY)
+
+    def test_no_cable_never_flags_a_cable_disconnect(self):
+        bus = FakeHidBus([])
+        with DaemonHarness(bus) as harness:
+            state = harness.start_wired(0xC09B, "mouse", 10)
+            time.sleep(1.2)
+            self.assertFalse(state['wired_just_disconnected'])
+            report = harness.stop()
+            self.assertEqual(report["errors"], [])
+
+    def test_a_cable_unplug_brings_the_wireless_reading_back(self):
+        bus = FakeHidBus([
+            FakeNode(b"/dev/sl2", 0xC54D,
+                     FakePairedDevice(kind=0x03, battery=50)),
+            FakeNode(b"/dev/sl2-wired", 0xC09B, FakePairedDevice(
+                kind=0x03, battery=77, charging=True), device_idx=0xFF),
+        ])
+        with DaemonHarness(bus) as harness:
+            harness.start_device(0xC54D, 0xC09B, "mouse", 10)
+            harness.wait_for_state("mouse", "77\n1\n1\n")
+            bus.unplug(b"/dev/sl2-wired")
+            harness.wait_for_state("mouse", "50\n1\n0\n")
+            report = harness.stop()
+            self.assertEqual(report["protocol_errors"], [])
+
+    def test_a_cable_that_connects_during_the_requery_keeps_its_reading(self):
+        # After a cable unplug the wireless monitor re-queries the receiver.
+        # If the cable comes back while that query is in flight, the late
+        # wireless reading must not replace the cable one. The wired monitor
+        # is played by hand so the interleaving is fixed.
+        bus = FakeHidBus([
+            FakeNode(b"/dev/sl2", 0xC54D,
+                     FakePairedDevice(kind=0x03, battery=50)),
+        ])
+        with DaemonHarness(bus) as harness:
+            lock = threading.Lock()
+            state = harness._fresh_state(0xC54D, 0xC09B)
+            harness.start_wireless(0xC54D, "mouse", 10, state=state, state_lock=lock)
+            harness.wait_for_state("mouse", "50\n1\n0\n")
+            harness.wait_for_open(b"/dev/sl2")
+            time.sleep(0.3)  # let the startup cycle finish its reads
+
+            gate = bus.hold_responses(b"/dev/sl2", 1, is_root_lookup)
+            with lock:
+                state['wired_just_disconnected'] = True
+            gate.wait_until_full(timeout=5)
+
+            with lock:
+                state['wired_connected'] = True
+                harness.module.write_state("mouse", 77, True, True, 10, state)
+            gate.release()
+
+            # The wireless monitor closes the receiver once it sees the
+            # cable, which is after the requery has published or not.
+            deadline = time.monotonic() + 5
+            while b"/dev/sl2" in bus.open_paths():
+                self.assertLess(time.monotonic(), deadline, "the receiver stayed open")
+                time.sleep(0.02)
+            self.assertEqual(harness.state_file("mouse").read_text(), "77\n1\n1\n")
             report = harness.stop()
             self.assertEqual(report["protocol_errors"], [])
 

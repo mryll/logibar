@@ -53,6 +53,15 @@ is_plain_model() {  # is_plain_model TEXT
     local LC_ALL=C
     [[ "$1" =~ $MODEL_RE ]]
 }
+# The first state line is foreign text too, and bash arithmetic EXPANDS text:
+# `[[ $x -le 10 ]]` on `a[$(cmd)]` runs cmd. So the battery must be one to
+# three ASCII digits, at most 100, before any arithmetic sees it. The length
+# bound keeps `10#` from wrapping; `10#` reads 08 as eight, not as bad octal.
+# Same locale pin as above: under en_US.UTF-8 `[0-9]` also matches «٣».
+is_percent() {  # is_percent TEXT
+    local LC_ALL=C
+    [[ "$1" =~ ^[0-9]{1,3}$ ]] && (( 10#$1 <= 100 ))
+}
 
 ICON="󰋎"
 ICON_CHARGING="󰋎 ⚡"
@@ -193,11 +202,13 @@ MODEL=${MODEL:0:64}
 is_plain_model "$MODEL" || MODEL=""
 
 # CONNECTED is the only connection flag: a 0% battery on a connected device
-# is a real critical reading, not an absent device.
-if [[ -z "$BATTERY" ]] || [[ "$CONNECTED" != "1" ]]; then
+# is a real critical reading, not an absent device. A battery line that is
+# not a plain percentage is no data, like a missing file.
+if ! is_percent "$BATTERY" || [[ "$CONNECTED" != "1" ]]; then
     echo '{"text": ""}'
     exit 0
 fi
+BATTERY=$(( 10#$BATTERY ))
 
 # --- Severity → class + bar color (bar color is always set, for the gauge) ---
 if [[ $BATTERY -le 10 ]]; then

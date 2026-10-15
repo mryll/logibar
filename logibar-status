@@ -104,6 +104,13 @@ is_plain_model() {  # is_plain_model TEXT
     local LC_ALL=C
     [[ "$1" =~ $MODEL_RE ]]
 }
+# The battery line goes into arithmetic, so it must be one to three ASCII
+# digits first: an unbounded run of digits wraps, and under en_US.UTF-8
+# `[0-9]` also matches «٣» or a fullwidth «３», which arithmetic rejects.
+is_battery_digits() {  # is_battery_digits TEXT
+    local LC_ALL=C
+    [[ "$1" =~ ^[0-9]{1,3}$ ]]
+}
 
 # Severity thresholds — single source of truth (mirrored nowhere else).
 WARNING_LEVEL=20
@@ -276,7 +283,10 @@ read_devices() {
         model=${model:0:64}
         is_plain_model "$model" && NAME[$id]="$model"
         UPDATED[$id]=$(date -Iseconds -d "@$(stat -c %Y "$file" 2>/dev/null || echo 0)" 2>/dev/null)
-        [[ "$battery" =~ ^[0-9]+$ ]] || continue
+        # Read in base 10: a leading zero (08) is bad octal, which made the
+        # severity checks fail and fall through to "ok".
+        is_battery_digits "$battery" || continue
+        battery=$(( 10#$battery ))
         # `connected` is the only connection flag. A battery of 0 with the
         # device connected is a real reading (the G915 TKL reports voltage,
         # and a drained cell converts to 0%) — hiding it would silence the

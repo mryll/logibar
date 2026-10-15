@@ -363,6 +363,28 @@ checkeq "a 10 MiB pywal cache still answers (rc)" 0 "$RC"
 check   "a 10 MiB pywal cache falls back to the defaults" \
     jq -e '.palette.critical == "#e06c75"' <<< "$OUT"
 
+# ── the battery line is never evaluated ──────────────────────────────────────
+#
+# Bash arithmetic expands the text it is given, and an array subscript runs a
+# command substitution: `[[ $x -le 10 ]]` on `a[$(touch f)]` creates f. The
+# battery line is text the widgets do not write, so it must be checked before
+# any arithmetic sees it. The marker sits inside the sandbox, never in /tmp.
+
+PWNED="$TMP/pwned"
+for _hostile in 'a[$(touch '"$PWNED"')]' '$(touch '"$PWNED"')' 'x[`touch '"$PWNED"'`]+1'; do
+    for w in "${WIDGETS[@]}"; do
+        reset_all
+        rm -f "$PWNED"
+        for d in "${DEVICES[@]}"; do
+            printf '%s\n1\n0\n' "$_hostile" > "$TMP/run/logibar/$d"
+        done
+        run_capture "$w"
+        checkeq "$w: a hostile battery line ($_hostile) (rc)" 0 "$RC"
+        check   "$w: a hostile battery line ($_hostile) is valid JSON" jq -e . <<< "$OUT"
+        check   "$w: a hostile battery line ($_hostile) runs nothing" test ! -e "$PWNED"
+    done
+done
+
 # ── the daemons ──────────────────────────────────────────────────────────────
 #
 # The write side of the same problem: a FIFO planted at the state file's path

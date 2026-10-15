@@ -129,6 +129,26 @@ check "a connected 0% battery is critical" \
 check "a connected 0% wins the aggregate" \
     jq -e '.aggregate.worst_battery == 0 and .aggregate.state == "critical"' <<< "$out"
 
+# ── battery line: digits only, read in base 10 ───────────────────────────────
+
+clear_states
+set_state keyboard 08 1 0
+out=$(run_status --json 2>&1)
+check "a leading zero is decimal: 08 is a critical 8%" \
+    jq -e '.devices[] | select(.id == "keyboard") | .battery == 8 and .state == "critical"' <<< "$out"
+clear_states
+set_state keyboard 150 1 0
+check "a three-digit battery above 100 is clamped to 100" \
+    jq -e '.devices[] | select(.id == "keyboard") | .battery == 100' <<< "$(run_status --json)"
+for _bad in 1000 99999999999999999999 -1 '' abc '٣' 'a[$(touch '"$TMP"'/pwned)]'; do
+    clear_states
+    set_state keyboard "$_bad" 1 0
+    out=$(run_status --json 2>/dev/null)
+    check "battery '$_bad' is no reading" \
+        jq -e '.devices[] | select(.id == "keyboard") | .connected == false and .battery == null' <<< "$out"
+done
+check "a hostile battery line runs nothing" test ! -e "$TMP/pwned"
+
 # ── disconnected / absent devices ────────────────────────────────────────────
 
 clear_states
