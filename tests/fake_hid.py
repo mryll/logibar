@@ -46,7 +46,7 @@ class FakePairedDevice:
 
     def __init__(self, kind, battery_feature=UNIFIED_BATTERY_FEATURE,
                  battery=None, voltage=None, charging=False, awake=True,
-                 name_index=0x03, battery_index=None):
+                 name_index=0x03, battery_index=None, wpid=None):
         if battery_feature not in _DEFAULT_BATTERY_INDEX:
             raise ValueError(f"unsupported battery feature 0x{battery_feature:04x}")
         if battery_index is None:
@@ -65,6 +65,7 @@ class FakePairedDevice:
         self.awake = awake
         self.name_index = name_index
         self.battery_index = battery_index
+        self.wpid = wpid
 
     def feature_index(self, feature_id):
         known = {DEVICE_NAME_FEATURE: self.name_index,
@@ -75,6 +76,9 @@ class FakePairedDevice:
         """Returns (report | None, protocol_error | None) for one request."""
         if len(cmd) >= 4 and cmd[0] == 0x10 and cmd[1] == 0xff and cmd[2] == 0x80:
             return None, None  # HID++ 1.0 set-register (enable_notifications)
+        if len(cmd) >= 5 and cmd[0] == 0x10 and cmd[1] == 0xff and cmd[2] == 0x83:
+            # The receiver answers its own registers, awake device or not.
+            return self._pairing_info_report(cmd), None
         if not self.awake:
             return None, None
         if len(cmd) >= 7 and cmd[0] == 0x10 and cmd[2] == 0x00:
@@ -86,6 +90,15 @@ class FakePairedDevice:
         if len(cmd) >= 4 and cmd[0] == 0x11 and cmd[2] == self.battery_index:
             return self._battery_report(cmd)
         return None, f"unknown command {bytes(cmd[:8]).hex()}"
+
+    def _pairing_info_report(self, cmd):
+        """HID++ 1.0 long-register read. Only pairing info (0xb5, slot 1) is
+        declared; a sheet without a wpid answers like an empty slot."""
+        if cmd[3] != 0xb5 or cmd[4] != 0x20 or self.wpid is None:
+            return bytes([0x10, 0xff, 0x8f, 0x83, cmd[3], 0x02, 0x00])
+        return bytes([0x11, 0xff, 0x83, 0xb5, 0x20, 0x07, 0x08,
+                      self.wpid >> 8, self.wpid & 0xff, 0x11, 0x00, 0x02]
+                     + [0x00] * 8)
 
     def _name_feature_report(self, cmd):
         if cmd[3] >> 4 != 0x2:  # only getDeviceType (function 2)
@@ -243,6 +256,11 @@ class FakeHidBus:
     def open_paths(self):
         with self._lock:
             return [fd["node"].path for fd in self._fds.values()]
+
+    def plug(self, node):
+        """Hot-plug: the next enumerate lists the node."""
+        with self._lock:
+            self.nodes[node.path] = node
 
     def intercept_next(self, path, predicate, transform):
         """One-shot: for the first request on `path` matching `predicate`,

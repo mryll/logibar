@@ -19,6 +19,8 @@ STATE_DIR = os.path.join(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getui
 # HID++ 1.0
 RECEIVER_IDX = 0xff
 REG_NOTIFICATIONS = 0x00
+REG_PAIRING_INFO = 0xb5
+PAIRING_INFO_DEVICE_1 = 0x20  # sub-register of device index 1; +1 per slot
 FLAG_WIRELESS = 0x000100
 FLAG_SOFTWARE_PRESENT = 0x000800
 DEVICE_NAME_FEATURE = 0x0005
@@ -45,14 +47,28 @@ PROBE_RETRY_SECONDS = 5.0
 # device that is actually paired instead of a generic "Logitech mouse". Keep
 # it to printable ASCII, 48 characters at most: the widgets treat the line as
 # foreign input and fall back to a generic name when it does not fit.
+# A wireless_pid of None is a cable-only line: its receiver is already
+# monitored by another line, which names the device through MODEL_BY_WPID.
 DEVICES = [
     (0xc539, 0xc088, "mouse", 10, "G Pro Wireless"),
     (0xc545, 0xc343, "keyboard", 9, "G915 TKL"),
     (0xc547, 0xc357, "keyboard", 9, "G915 X TKL"),
     (0xc547, 0xc094, "mouse", 10, "PRO X Superlight"),
     (0xc54d, 0xc09b, "mouse", 10, "PRO X Superlight 2"),
+    (None, 0xc098, "mouse", 10, "G502 X LIGHTSPEED"),
 ]
 MODEL_BY_PIDS = {(wireless, wired): model for wireless, wired, _, _, model in DEVICES}
+# A receiver PID can carry more than one model of the same kind (c547 pairs
+# the PRO X Superlight and the G502 X LIGHTSPEED), so the table above cannot
+# always name the mouse. The receiver's pairing register names the paired
+# device by its wireless PID; a model listed here replaces the table name
+# for that receiver, but only on a line of the same device type, so a
+# keyboard line never takes a mouse name. Same rules as the table:
+# printable ASCII, 48 at most.
+# wireless_pid -> (device type, model)
+MODEL_BY_WPID = {
+    0x409f: ("mouse", "G502 X LIGHTSPEED"),
+}
 BATTERY_FEATURE_BY_RECEIVER = {
     0xc539: BATTERY_VOLTAGE_FEATURE,
     0xc545: BATTERY_VOLTAGE_FEATURE,
@@ -74,7 +90,8 @@ BATTERY_VOLTAGE_LEVELS = (
 )
 SHARED_RECEIVER_PIDS = {
     pid for pid, _, _, _, _ in DEVICES
-    if sum(device_pid == pid for device_pid, _, _, _, _ in DEVICES) > 1
+    if pid is not None
+    and sum(device_pid == pid for device_pid, _, _, _, _ in DEVICES) > 1
 }
 
 running = True
@@ -100,7 +117,12 @@ def write_state(name, battery, connected, charging, waybar_signal, state):
     try:
         with publish_lock:
             sources = source_states.setdefault(name, {})
-            sources[state['_source_id']] = (battery, connected, charging, state.get('_model', ''))
+            # The paired name describes the device on the receiver. While the
+            # cable is connected, the reading comes from the cable, and the
+            # cable PID names its own model.
+            paired = '' if state.get('wired_connected') else state.get('_paired_model')
+            model = paired or state.get('_model', '')
+            sources[state['_source_id']] = (battery, connected, charging, model)
             connected_sources = [source for source in sources.values() if source[1]]
             selected = min(connected_sources, key=lambda source: source[0]) if connected_sources else (0, False, False, '')
             # Four lines: battery, connected, charging, model. The model is the
@@ -167,6 +189,65 @@ def flush_buffer(dev):
                 break
     except:
         pass
+
+def pairing_reply_wpid(r, sub):
+    """The wireless PID in a pairing-info reply to sub-register `sub`, or None."""
+    if r[0] == 0x11 and len(r) > 8 and r[2] == 0x83 and r[3] == REG_PAIRING_INFO and r[4] == sub:
+        return r[7] << 8 | r[8]
+    return None
+
+def is_pairing_error(r):
+    """An error to a pairing-register read. The error report does not echo
+    the sub-register, so it can also be the answer to another reader's
+    request on the same node."""
+    return r[0] == 0x10 and r[2] == 0x8f and r[3] == 0x83 and r[4] == REG_PAIRING_INFO
+
+def read_paired_wpid(dev, device_idx):
+    """Wireless PID of the device paired in slot device_idx, or None.
+
+    A HID++ 1.0 long-register READ (sub-id 0x83, never the 0x82 write) on
+    the receiver: the answer is a long report (0x11) that echoes the register
+    and sub-register, with the PID in bytes 7 and 8. An empty slot or a
+    receiver without the register answers with an error report (0x8f). hidraw
+    copies every report to every open descriptor, so an error can belong to
+    another reader: an error ends the read only when the node goes quiet, and
+    a matching reply after it still counts. Bounded like every read loop."""
+    sub = PAIRING_INFO_DEVICE_1 + device_idx - 1
+    saw_error = False
+    try:
+        flush_buffer(dev)
+        dev.write([0x10, RECEIVER_IDX, 0x83, REG_PAIRING_INFO, sub, 0x00, 0x00])
+        for _ in range(20):
+            r = dev.read(64, timeout_ms=50)
+            if not r:
+                if saw_error:
+                    break
+                continue
+            if len(r) < 5 or r[1] != RECEIVER_IDX:
+                continue
+            wpid = pairing_reply_wpid(r, sub)
+            if wpid is not None:
+                return wpid
+            saw_error = saw_error or is_pairing_error(r)
+    except Exception:
+        pass
+    return None
+
+def paired_model(name, wpid):
+    """The MODEL_BY_WPID name for a line of type `name`, or '' so that the
+    table name applies."""
+    kind, model = MODEL_BY_WPID.get(wpid, (None, ''))
+    return model if kind == name else ''
+
+def refresh_paired_model(dev, device_idx, name, state, state_lock, keep_on_no_answer=False):
+    """Name the paired device from MODEL_BY_WPID, or clear the override so
+    the table name applies. After a wake the previous name stays when the
+    receiver gives no wireless PID: a lost reply must not rename the device."""
+    wpid = read_paired_wpid(dev, device_idx)
+    if wpid is None and keep_on_no_answer:
+        return
+    with state_lock:
+        state['_paired_model'] = paired_model(name, wpid)
 
 def get_feature_index(dev, device_idx, feature_id, swid=SWID_MONITOR, retries=3):
     """Get a HID++ feature index with retries. ROOT getFeature is function 0,
@@ -440,8 +521,10 @@ def consume_wired_disconnect(state, state_lock):
 def handle_connection_event(r, dev, device_idx, name, waybar_signal, battery_feature, state, state_lock):
     link_off = r[4] & 0x40
     if not link_off:
-        # Device woke up - query battery
+        # Device woke up - query battery. A wake can also follow a new
+        # pairing, so read the paired model again first.
         time.sleep(0.2)
+        refresh_paired_model(dev, device_idx, name, state, state_lock, keep_on_no_answer=True)
         requery_wireless_battery(dev, device_idx, name, waybar_signal, battery_feature, state, state_lock)
         return
     # Device disconnected/off - hide widget
@@ -524,6 +607,7 @@ def monitor_wireless(wireless_pid, name, waybar_signal, battery_feature, state, 
 
                 time.sleep(0.1)
                 enable_notifications(dev)
+                refresh_paired_model(dev, device_idx, name, state, state_lock)
 
                 # Try to query battery with retries
                 queried = requery_wireless_battery(dev, device_idx, name, waybar_signal, battery_feature, state, state_lock)
@@ -646,6 +730,10 @@ def monitor_device(wireless_pid, wired_pid, name, waybar_signal, model=None):
 
     t_wireless = threading.Thread(target=monitor_wireless, args=(wireless_pid, name, waybar_signal, battery_feature, state, state_lock), daemon=True)
     t_wired = threading.Thread(target=monitor_wired, args=(wired_pid, name, waybar_signal, battery_feature, state, state_lock), daemon=True)
+
+    if wireless_pid is None:
+        t_wired.start()
+        return [t_wired]
 
     t_wireless.start()
     t_wired.start()

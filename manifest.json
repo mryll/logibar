@@ -49,7 +49,7 @@
         "key": "showMouse",
         "type": "boolean",
         "label": "Show mouse",
-        "description": "Battery of the connected Logitech mouse (G Pro Wireless, PRO X Superlight, PRO X Superlight 2). The panel names the model.",
+        "description": "Battery of the connected Logitech mouse (G Pro Wireless, PRO X Superlight, PRO X Superlight 2, G502 X LIGHTSPEED). The panel names the model.",
         "defaultValue": true
       },
       {
