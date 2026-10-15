@@ -1137,12 +1137,14 @@ class BusIntegrationTests(unittest.TestCase):
                      serial="M1"),
         ])
         with DaemonHarness(bus) as harness:
-            # The wireless monitor alone: with no cable node, the wired
-            # monitor flags a cable disconnect on every pass, and the
-            # requery that follows can swallow the link events below.
+            # Both monitors, as in production: with no cable node the wired
+            # monitor must stay silent, or its requeries swallow the link
+            # events below.
             state = harness._fresh_state(0xC547, 0xC094)
             state['_model'] = "PRO X Superlight"
-            harness.start_wireless(0xC547, "mouse", 10, state=state)
+            lock = threading.Lock()
+            harness.start_wireless(0xC547, "mouse", 10, state=state, state_lock=lock)
+            harness.start_wired(0xC094, "mouse", 10, state=state, state_lock=lock)
             harness.wait_for_state("mouse", "41\n1\n0\nPRO X Superlight")
             harness.wait_for_open(b"/dev/mouse")
 
@@ -1157,6 +1159,54 @@ class BusIntegrationTests(unittest.TestCase):
             bus.nodes[b"/dev/mouse"].device.wpid = 0x4093
             bus.emit_link(b"/dev/mouse", off=False)
             harness.wait_for_state("mouse", "41\n1\n0\nPRO X Superlight")
+            report = harness.stop()
+            self.assertEqual(report["protocol_errors"], [])
+
+    def test_with_no_cable_the_receiver_hears_nothing_after_startup(self):
+        # The wired monitor polls every 0.5 s while no cable is plugged. A
+        # cable that was never there is not a cable that was unplugged: the
+        # receiver must not be re-armed and re-queried on every pass.
+        bus = FakeHidBus([
+            FakeNode(b"/dev/sl2", 0xC54D,
+                     FakePairedDevice(kind=0x03, battery=50)),
+        ])
+        with DaemonHarness(bus) as harness:
+            harness.start_device(0xC54D, 0xC09B, "mouse", 10)
+            harness.wait_for_state("mouse", "50\n1\n0\n")
+            harness.wait_for_open(b"/dev/sl2")
+            time.sleep(0.3)  # let the startup cycle finish its reads
+
+            def receiver_writes():
+                return [entry for entry in bus.log
+                        if entry[0] == "write" and entry[2] == b"/dev/sl2"]
+
+            before = len(receiver_writes())
+            time.sleep(2.5)
+            self.assertEqual(receiver_writes()[before:], [])
+            report = harness.stop()
+            self.assertEqual(report["protocol_errors"], [])
+
+    def test_no_cable_never_flags_a_cable_disconnect(self):
+        bus = FakeHidBus([])
+        with DaemonHarness(bus) as harness:
+            state = harness.start_wired(0xC09B, "mouse", 10)
+            time.sleep(1.2)
+            self.assertFalse(state['wired_just_disconnected'])
+            report = harness.stop()
+            self.assertEqual(report["errors"], [])
+
+    def test_a_cable_unplug_brings_the_wireless_reading_back(self):
+        bus = FakeHidBus([
+            FakeNode(b"/dev/sl2", 0xC54D,
+                     FakePairedDevice(kind=0x03, battery=50)),
+            FakeNode(b"/dev/sl2-wired", 0xC09B, FakePairedDevice(
+                kind=0x03, battery=77, charging=True), device_idx=0xFF),
+        ])
+        with DaemonHarness(bus) as harness:
+            harness.start_device(0xC54D, 0xC09B, "mouse", 10)
+            harness.wait_for_state("mouse", "77\n1\n1\n")
+            bus.unplug(b"/dev/sl2-wired")
+            harness.wait_for_state("mouse", "50\n1\n0\n")
             report = harness.stop()
             self.assertEqual(report["protocol_errors"], [])
 

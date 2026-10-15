@@ -679,7 +679,11 @@ def monitor_wired(wired_pid, name, waybar_signal, battery_feature, state, state_
                 with state_lock:
                     was_connected = state.get('wired_connected')
                     state['wired_connected'] = False
-                    state['wired_just_disconnected'] = True
+                    # Only a real unplug flags the wireless side: set on
+                    # every pass with no cable, it re-armed the receiver and
+                    # re-queried the battery about once a second.
+                    if was_connected:
+                        state['wired_just_disconnected'] = True
                     wireless = state.get('wireless_connected')
                     if was_connected and not wireless:
                         write_state(name, 0, False, False, waybar_signal, state)
@@ -734,7 +738,8 @@ def monitor_wired(wired_pid, name, waybar_signal, battery_feature, state, state_
             with state_lock:
                 was_connected = state.get('wired_connected')
                 state['wired_connected'] = False
-                state['wired_just_disconnected'] = True
+                if was_connected:
+                    state['wired_just_disconnected'] = True
                 wireless = state.get('wireless_connected')
                 if was_connected and not wireless:
                     write_state(name, 0, False, False, waybar_signal, state)
