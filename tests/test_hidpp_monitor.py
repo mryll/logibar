@@ -352,6 +352,23 @@ class SoftwareIdTests(unittest.TestCase):
             monitor.write_state = original_write_state
 
 
+class ReadCounter:
+    """Wraps a fake descriptor and records each read and its timeout."""
+
+    def __init__(self, fd):
+        self._fd = fd
+        self.count = 0
+        self.timeouts = []
+
+    def write(self, cmd):
+        return self._fd.write(cmd)
+
+    def read(self, size, timeout_ms=0):
+        self.count += 1
+        self.timeouts.append(timeout_ms)
+        return self._fd.read(size, timeout_ms)
+
+
 class PairingInfoTests(unittest.TestCase):
     def test_the_pairing_register_returns_the_wireless_pid(self):
         _bus, fd = single_device_bus(
@@ -367,8 +384,70 @@ class PairingInfoTests(unittest.TestCase):
         _bus, fd = single_device_bus(
             0xC547, FakePairedDevice(kind=0x03, battery=41, wpid=0x4099))
         state = {'_model': "PRO X Superlight"}
-        monitor.refresh_paired_model(fd, 0x01, state, threading.Lock())
+        monitor.refresh_paired_model(fd, 0x01, "mouse", state, threading.Lock())
         self.assertEqual(state['_paired_model'], "")
+
+    def test_the_request_is_a_long_register_read_of_slot_1(self):
+        # 0x83 reads a long register; 0x82 would WRITE it and could change
+        # the receiver's pairing state.
+        bus, fd = single_device_bus(
+            0xC547, FakePairedDevice(kind=0x03, battery=41, wpid=0x409F))
+        monitor.read_paired_wpid(fd, 0x01)
+        writes = [list(entry[4]) for entry in bus.log if entry[0] == "write"]
+        self.assertEqual(writes, [[0x10, 0xFF, 0x83, 0xB5, 0x20, 0x00, 0x00]])
+
+    def test_another_readers_error_does_not_hide_the_reply(self):
+        # The error report does not echo the sub-register: an error to
+        # another reader's 0xb5 request (Solaar reads 0x30 and 0x40 too)
+        # looks the same as an error to this one.
+        bus, fd = single_device_bus(
+            0xC547, FakePairedDevice(kind=0x03, battery=41, wpid=0x409F))
+        foreign_error = bytes([0x10, 0xFF, 0x8F, 0x83, 0xB5, 0x03, 0x00])
+        bus.intercept_next(b"/dev/receiver", lambda cmd: cmd[2] == 0x83,
+                           lambda _request, reply: [foreign_error, reply])
+        self.assertEqual(monitor.read_paired_wpid(fd, 0x01), 0x409F)
+
+    def test_an_error_reply_ends_the_read_after_one_quiet_read(self):
+        _bus, fd = single_device_bus(
+            0xC547, FakePairedDevice(kind=0x03, battery=41))
+        reads = ReadCounter(fd)
+        self.assertIsNone(monitor.read_paired_wpid(reads, 0x01))
+        # The flush reads until quiet (1), then the error (1), then one
+        # quiet read ends it (1).
+        self.assertEqual(reads.count, 3)
+
+    def test_a_silent_receiver_gives_up_within_the_read_budget(self):
+        bus, fd = single_device_bus(
+            0xC547, FakePairedDevice(kind=0x03, battery=41, wpid=0x409F))
+        bus.intercept_next(b"/dev/receiver", lambda cmd: cmd[2] == 0x83,
+                           lambda _request, _reply: [])
+        reads = ReadCounter(fd)
+        self.assertIsNone(monitor.read_paired_wpid(reads, 0x01))
+        self.assertEqual(reads.count, 1 + 20)
+        self.assertTrue(all(timeout <= 50 for timeout in reads.timeouts))
+
+    def test_a_reply_for_another_slot_is_not_taken(self):
+        bus, fd = single_device_bus(
+            0xC547, FakePairedDevice(kind=0x03, battery=41, wpid=0x409F))
+        slot_2 = bytes([0x11, 0xFF, 0x83, 0xB5, 0x21, 0x07, 0x08, 0x40, 0x9F,
+                        0x11, 0x00, 0x02] + [0x00] * 8)
+        bus.intercept_next(b"/dev/receiver", lambda cmd: cmd[2] == 0x83,
+                           lambda _request, _reply: [slot_2])
+        self.assertIsNone(monitor.read_paired_wpid(fd, 0x01))
+
+    def test_a_mouse_wpid_never_names_a_keyboard_line(self):
+        self.assertEqual(monitor.paired_model("mouse", 0x409F), "G502 X LIGHTSPEED")
+        self.assertEqual(monitor.paired_model("keyboard", 0x409F), "")
+
+    def test_a_wake_without_an_answer_keeps_the_paired_name(self):
+        bus, fd = single_device_bus(
+            0xC547, FakePairedDevice(kind=0x03, battery=41, wpid=0x409F))
+        state = {'_paired_model': "G502 X LIGHTSPEED"}
+        bus.intercept_next(b"/dev/receiver", lambda cmd: cmd[2] == 0x83,
+                           lambda _request, _reply: [])
+        monitor.refresh_paired_model(fd, 0x01, "mouse", state, threading.Lock(),
+                                     keep_on_no_answer=True)
+        self.assertEqual(state['_paired_model'], "G502 X LIGHTSPEED")
 
 
 class StateAggregationTests(unittest.TestCase):
@@ -911,6 +990,83 @@ class BusIntegrationTests(unittest.TestCase):
             report = harness.stop()
             self.assertEqual(report["protocol_errors"], [])
 
+    def test_the_paired_names_do_not_depend_on_the_receiver_order(self):
+        # Same two c547 receivers as above, enumerated mouse first.
+        bus = FakeHidBus([
+            FakeNode(b"/dev/mouse", 0xC547,
+                     FakePairedDevice(kind=0x03, battery=41, wpid=0x409F),
+                     serial="M1"),
+            FakeNode(b"/dev/kbd", 0xC547,
+                     FakePairedDevice(kind=0x00, battery=59), serial="K1"),
+        ])
+        with DaemonHarness(bus) as harness:
+            harness.threads.extend(harness.module.monitor_device(0xC547, 0xC357, "keyboard", 9))
+            harness.threads.extend(harness.module.monitor_device(0xC547, 0xC094, "mouse", 10))
+            harness.wait_for_state("keyboard", "59\n1\n0\nG915 X TKL")
+            harness.wait_for_state("mouse", "41\n1\n0\nG502 X LIGHTSPEED")
+            report = harness.stop()
+            self.assertEqual(report["protocol_errors"], [])
+
+    def test_a_keyboard_line_keeps_its_name_when_the_wpid_is_a_mouse(self):
+        bus = FakeHidBus([
+            FakeNode(b"/dev/kbd", 0xC547,
+                     FakePairedDevice(kind=0x00, battery=59, wpid=0x409F),
+                     serial="K1"),
+        ])
+        with DaemonHarness(bus) as harness:
+            harness.threads.extend(harness.module.monitor_device(0xC547, 0xC357, "keyboard", 9))
+            harness.wait_for_state("keyboard", "59\n1\n0\nG915 X TKL")
+            report = harness.stop()
+            self.assertEqual(report["protocol_errors"], [])
+
+    def test_the_cable_reading_keeps_the_name_of_its_cable(self):
+        # The receiver has a G502 X paired, but the cable on this line is
+        # the PRO X Superlight one (c094): its reading must not carry the
+        # paired name.
+        bus = FakeHidBus([
+            FakeNode(b"/dev/mouse", 0xC547,
+                     FakePairedDevice(kind=0x03, battery=41, wpid=0x409F),
+                     serial="M1"),
+        ])
+        with DaemonHarness(bus) as harness:
+            harness.threads.extend(harness.module.monitor_device(0xC547, 0xC094, "mouse", 10))
+            harness.wait_for_state("mouse", "41\n1\n0\nG502 X LIGHTSPEED")
+            bus.plug(FakeNode(b"/dev/sl-wired", 0xC094, FakePairedDevice(
+                kind=0x03, battery=77, charging=True), device_idx=0xFF))
+            harness.wait_for_state("mouse", "77\n1\n1\nPRO X Superlight")
+            report = harness.stop()
+            self.assertEqual(report["protocol_errors"], [])
+
+    def test_a_new_pairing_renames_the_mouse_on_the_next_wake(self):
+        bus = FakeHidBus([
+            FakeNode(b"/dev/mouse", 0xC547,
+                     FakePairedDevice(kind=0x03, battery=41, wpid=0x4093),
+                     serial="M1"),
+        ])
+        with DaemonHarness(bus) as harness:
+            # The wireless monitor alone: with no cable node, the wired
+            # monitor flags a cable disconnect on every pass, and the
+            # requery that follows can swallow the link events below.
+            state = harness._fresh_state(0xC547, 0xC094)
+            state['_model'] = "PRO X Superlight"
+            harness.start_wireless(0xC547, "mouse", 10, state=state)
+            harness.wait_for_state("mouse", "41\n1\n0\nPRO X Superlight")
+            harness.wait_for_open(b"/dev/mouse")
+
+            bus.emit_link(b"/dev/mouse", off=True)
+            harness.wait_for_state("mouse", "0\n0\n0\n")
+            bus.nodes[b"/dev/mouse"].device.wpid = 0x409F
+            bus.emit_link(b"/dev/mouse", off=False)
+            harness.wait_for_state("mouse", "41\n1\n0\nG502 X LIGHTSPEED")
+
+            bus.emit_link(b"/dev/mouse", off=True)
+            harness.wait_for_state("mouse", "0\n0\n0\n")
+            bus.nodes[b"/dev/mouse"].device.wpid = 0x4093
+            bus.emit_link(b"/dev/mouse", off=False)
+            harness.wait_for_state("mouse", "41\n1\n0\nPRO X Superlight")
+            report = harness.stop()
+            self.assertEqual(report["protocol_errors"], [])
+
     def test_link_events_toggle_the_published_state(self):
         bus = FakeHidBus([
             FakeNode(b"/dev/sl2", 0xC54D,
@@ -1005,8 +1161,19 @@ class DeviceCoverageTests(unittest.TestCase):
             self.assertIsNotNone(plain.fullmatch(model), model)
         self.assertEqual(len(models), len(set(models)))
         self.assertEqual(monitor.MODEL_BY_PIDS[(0xC539, 0xC088)], "G Pro Wireless")
-        for model in monitor.MODEL_BY_WPID.values():
+        for kind, model in monitor.MODEL_BY_WPID.values():
+            self.assertIn(kind, monitor.DEVICE_KIND)
             self.assertIsNotNone(plain.fullmatch(model), model)
+
+    def test_a_cable_only_line_names_its_mouse_like_the_receiver_does(self):
+        # The receiver side of a cable-only line is named by MODEL_BY_WPID;
+        # the cable side by its own line. Both must give the same name.
+        paired = set(monitor.MODEL_BY_WPID.values())
+        cable_only = [(name, model) for wireless, _, name, _, model
+                      in monitor.DEVICES if wireless is None]
+        self.assertTrue(cable_only)
+        for name, model in cable_only:
+            self.assertIn((name, model), paired)
 
     def test_g915_tkl_and_g_pro_wireless_report_voltage(self):
         self.assertEqual(set(monitor.BATTERY_FEATURE_BY_RECEIVER), {0xC545, 0xC539})

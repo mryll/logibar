@@ -257,6 +257,11 @@ class FakeHidBus:
         with self._lock:
             return [fd["node"].path for fd in self._fds.values()]
 
+    def plug(self, node):
+        """Hot-plug: the next enumerate lists the node."""
+        with self._lock:
+            self.nodes[node.path] = node
+
     def intercept_next(self, path, predicate, transform):
         """One-shot: for the first request on `path` matching `predicate`,
         broadcast `transform(request, default_report)` (a list of reports)
