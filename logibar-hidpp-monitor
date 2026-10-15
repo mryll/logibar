@@ -19,6 +19,8 @@ STATE_DIR = os.path.join(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getui
 # HID++ 1.0
 RECEIVER_IDX = 0xff
 REG_NOTIFICATIONS = 0x00
+REG_PAIRING_INFO = 0xb5
+PAIRING_INFO_DEVICE_1 = 0x20  # sub-register of device index 1; +1 per slot
 FLAG_WIRELESS = 0x000100
 FLAG_SOFTWARE_PRESENT = 0x000800
 DEVICE_NAME_FEATURE = 0x0005
@@ -53,6 +55,14 @@ DEVICES = [
     (0xc54d, 0xc09b, "mouse", 10, "PRO X Superlight 2"),
 ]
 MODEL_BY_PIDS = {(wireless, wired): model for wireless, wired, _, _, model in DEVICES}
+# A receiver PID can carry more than one model of the same kind (c547 pairs
+# the PRO X Superlight and the G502 X LIGHTSPEED), so the table above cannot
+# always name the mouse. The receiver's pairing register names the paired
+# device by its wireless PID; a model listed here replaces the table name
+# for that receiver. Same rules as the table: printable ASCII, 48 at most.
+MODEL_BY_WPID = {
+    0x409f: "G502 X LIGHTSPEED",
+}
 BATTERY_FEATURE_BY_RECEIVER = {
     0xc539: BATTERY_VOLTAGE_FEATURE,
     0xc545: BATTERY_VOLTAGE_FEATURE,
@@ -100,7 +110,8 @@ def write_state(name, battery, connected, charging, waybar_signal, state):
     try:
         with publish_lock:
             sources = source_states.setdefault(name, {})
-            sources[state['_source_id']] = (battery, connected, charging, state.get('_model', ''))
+            model = state.get('_paired_model') or state.get('_model', '')
+            sources[state['_source_id']] = (battery, connected, charging, model)
             connected_sources = [source for source in sources.values() if source[1]]
             selected = min(connected_sources, key=lambda source: source[0]) if connected_sources else (0, False, False, '')
             # Four lines: battery, connected, charging, model. The model is the
@@ -167,6 +178,36 @@ def flush_buffer(dev):
                 break
     except:
         pass
+
+def read_paired_wpid(dev, device_idx):
+    """Wireless PID of the device paired in slot device_idx, or None.
+
+    A HID++ 1.0 long-register read on the receiver: the answer is a long
+    report (0x11) that echoes the register and sub-register, with the PID in
+    bytes 7 and 8. An empty slot or a receiver without the register answers
+    with an error report (0x8f) instead."""
+    sub = PAIRING_INFO_DEVICE_1 + device_idx - 1
+    try:
+        flush_buffer(dev)
+        dev.write([0x10, RECEIVER_IDX, 0x83, REG_PAIRING_INFO, sub, 0x00, 0x00])
+        for _ in range(20):
+            r = dev.read(64, timeout_ms=50)
+            if not r or len(r) < 5 or r[1] != RECEIVER_IDX:
+                continue
+            if r[2] == 0x8f and r[3] == 0x83 and r[4] == REG_PAIRING_INFO:
+                return None
+            if r[0] == 0x11 and r[2] == 0x83 and r[3] == REG_PAIRING_INFO and r[4] == sub and len(r) > 8:
+                return r[7] << 8 | r[8]
+    except Exception:
+        pass
+    return None
+
+def refresh_paired_model(dev, device_idx, state, state_lock):
+    """Name the paired device from MODEL_BY_WPID, or clear the override so
+    the table name applies."""
+    wpid = read_paired_wpid(dev, device_idx)
+    with state_lock:
+        state['_paired_model'] = MODEL_BY_WPID.get(wpid, '')
 
 def get_feature_index(dev, device_idx, feature_id, swid=SWID_MONITOR, retries=3):
     """Get a HID++ feature index with retries. ROOT getFeature is function 0,
@@ -524,6 +565,7 @@ def monitor_wireless(wireless_pid, name, waybar_signal, battery_feature, state, 
 
                 time.sleep(0.1)
                 enable_notifications(dev)
+                refresh_paired_model(dev, device_idx, state, state_lock)
 
                 # Try to query battery with retries
                 queried = requery_wireless_battery(dev, device_idx, name, waybar_signal, battery_feature, state, state_lock)

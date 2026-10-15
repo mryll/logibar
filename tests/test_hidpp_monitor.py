@@ -352,6 +352,25 @@ class SoftwareIdTests(unittest.TestCase):
             monitor.write_state = original_write_state
 
 
+class PairingInfoTests(unittest.TestCase):
+    def test_the_pairing_register_returns_the_wireless_pid(self):
+        _bus, fd = single_device_bus(
+            0xC547, FakePairedDevice(kind=0x03, battery=41, wpid=0x409F))
+        self.assertEqual(monitor.read_paired_wpid(fd, 0x01), 0x409F)
+
+    def test_an_empty_slot_returns_none(self):
+        _bus, fd = single_device_bus(
+            0xC547, FakePairedDevice(kind=0x03, battery=41))
+        self.assertIsNone(monitor.read_paired_wpid(fd, 0x01))
+
+    def test_an_unlisted_wpid_keeps_the_table_name(self):
+        _bus, fd = single_device_bus(
+            0xC547, FakePairedDevice(kind=0x03, battery=41, wpid=0x4099))
+        state = {'_model': "PRO X Superlight"}
+        monitor.refresh_paired_model(fd, 0x01, state, threading.Lock())
+        self.assertEqual(state['_paired_model'], "")
+
+
 class StateAggregationTests(unittest.TestCase):
     def test_wired_connect_cannot_be_overwritten_by_wireless_disconnect(self):
         original_state_dir = monitor.STATE_DIR
@@ -854,6 +873,26 @@ class BusIntegrationTests(unittest.TestCase):
             report = harness.stop()
             self.assertEqual(report["protocol_errors"], [])
 
+    def test_a_listed_wireless_pid_names_the_paired_mouse(self):
+        # c547 pairs more than one mouse model, and the table names only one.
+        # The receiver's pairing register says which mouse is paired. The
+        # sheet's reply follows one captured from a G502 X LIGHTSPEED:
+        # 11 ff 83 b5 20 07 08 40 9f 11 00 02 ...
+        bus = FakeHidBus([
+            FakeNode(b"/dev/kbd", 0xC547,
+                     FakePairedDevice(kind=0x00, battery=59), serial="K1"),
+            FakeNode(b"/dev/mouse", 0xC547,
+                     FakePairedDevice(kind=0x03, battery=41, wpid=0x409F),
+                     serial="M1"),
+        ])
+        with DaemonHarness(bus) as harness:
+            harness.threads.extend(harness.module.monitor_device(0xC547, 0xC357, "keyboard", 9))
+            harness.threads.extend(harness.module.monitor_device(0xC547, 0xC094, "mouse", 10))
+            harness.wait_for_state("keyboard", "59\n1\n0\nG915 X TKL")
+            harness.wait_for_state("mouse", "41\n1\n0\nG502 X LIGHTSPEED")
+            report = harness.stop()
+            self.assertEqual(report["protocol_errors"], [])
+
     def test_link_events_toggle_the_published_state(self):
         bus = FakeHidBus([
             FakeNode(b"/dev/sl2", 0xC54D,
@@ -946,6 +985,8 @@ class DeviceCoverageTests(unittest.TestCase):
             self.assertIsNotNone(plain.fullmatch(model), model)
         self.assertEqual(len(models), len(set(models)))
         self.assertEqual(monitor.MODEL_BY_PIDS[(0xC539, 0xC088)], "G Pro Wireless")
+        for model in monitor.MODEL_BY_WPID.values():
+            self.assertIsNotNone(plain.fullmatch(model), model)
 
     def test_g915_tkl_and_g_pro_wireless_report_voltage(self):
         self.assertEqual(set(monitor.BATTERY_FEATURE_BY_RECEIVER), {0xC545, 0xC539})
