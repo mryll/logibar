@@ -516,15 +516,20 @@ def publish_wireless_battery(name, waybar_signal, state, state_lock, soc, chargi
         state['battery'] = soc
         state['charging'] = charging
         state['feat_idx'] = feat_idx
+        state['_requery_due'] = False
         if not state.get('wired_connected'):
             write_state(name, soc, True, charging, waybar_signal, state)
 
 def requery_wireless_battery(dev, device_idx, name, waybar_signal, battery_feature, state, state_lock):
+    """Query and publish the wireless battery. A query with no answer marks
+    the state so that retry_failed_requery tries again, whoever asked."""
     feat_idx = get_feature_index(dev, device_idx, battery_feature)
-    if not feat_idx:
-        return False
-    soc, charging = query_battery(dev, device_idx, feat_idx, battery_feature)
+    soc, charging = (None, None)
+    if feat_idx:
+        soc, charging = query_battery(dev, device_idx, feat_idx, battery_feature)
     if soc is None:
+        with state_lock:
+            state['_requery_due'] = True
         return False
     publish_wireless_battery(name, waybar_signal, state, state_lock, soc, charging, feat_idx)
     return True
@@ -561,10 +566,12 @@ def handle_connection_event(r, dev, device_idx, name, waybar_signal, battery_fea
         refresh_paired_model(dev, device_idx, name, state, state_lock, keep_on_no_answer=True)
         requery_wireless_battery(dev, device_idx, name, waybar_signal, battery_feature, state, state_lock)
         return
-    # Device disconnected/off - hide widget
+    # Device disconnected/off - hide widget. No retry while it is away: the
+    # link-on event queries again.
     with state_lock:
         was_connected = state.get('wireless_connected')
         state['wireless_connected'] = False
+        state['_requery_due'] = False
         wired = state.get('wired_connected')
         if was_connected and not wired:
             write_state(name, 0, False, False, waybar_signal, state)
@@ -609,12 +616,31 @@ REQUERY_MAX_DELAY = 60.0
 def next_requery_delay(delay):
     return min(delay * 2, REQUERY_MAX_DELAY)
 
+def retry_failed_requery(retry, dev, device_idx, name, waybar_signal, battery_feature, state, state_lock):
+    """Retry a battery query that got no answer (startup, cable unplug or
+    wake), with a growing delay. `retry` holds the schedule: 'at' and
+    'delay'."""
+    with state_lock:
+        due = state.get('_requery_due')
+    if not due:
+        retry['at'] = None
+        retry['delay'] = REQUERY_FIRST_DELAY
+        return
+    now = time.monotonic()
+    if retry['at'] is None:
+        retry['at'] = now + retry['delay']
+        return
+    if now < retry['at']:
+        return
+    if not requery_wireless_battery(dev, device_idx, name, waybar_signal, battery_feature, state, state_lock):
+        retry['delay'] = next_requery_delay(retry['delay'])
+        retry['at'] = time.monotonic() + retry['delay']
+
 def monitor_wireless(wireless_pid, name, waybar_signal, battery_feature, state, state_lock):
     device_idx = 0x01
     dev = None
     opened = None  # (path, serial) of the open receiver
-    requery_at = None  # monotonic time of the next retry, None while not needed
-    requery_delay = REQUERY_FIRST_DELAY
+    retry = {'at': None, 'delay': REQUERY_FIRST_DELAY}
 
     while running:
         with state_lock:
@@ -661,20 +687,11 @@ def monitor_wireless(wireless_pid, name, waybar_signal, battery_feature, state, 
                     opened = None
                     time.sleep(0.5)
                     continue
-                requery_delay = REQUERY_FIRST_DELAY
-                requery_at = None if queried else time.monotonic() + requery_delay
 
             if consume_wired_disconnect(state, state_lock):
                 enable_notifications(dev)
-                queried = requery_wireless_battery(dev, device_idx, name, waybar_signal, battery_feature, state, state_lock)
-                requery_delay = REQUERY_FIRST_DELAY
-                requery_at = None if queried else time.monotonic() + requery_delay
-            elif requery_at is not None and time.monotonic() >= requery_at:
-                if requery_wireless_battery(dev, device_idx, name, waybar_signal, battery_feature, state, state_lock):
-                    requery_at = None
-                else:
-                    requery_delay = next_requery_delay(requery_delay)
-                    requery_at = time.monotonic() + requery_delay
+                requery_wireless_battery(dev, device_idx, name, waybar_signal, battery_feature, state, state_lock)
+            retry_failed_requery(retry, dev, device_idx, name, waybar_signal, battery_feature, state, state_lock)
 
             # Blocking read with timeout - true event-driven
             r = dev.read(64, timeout_ms=1000)

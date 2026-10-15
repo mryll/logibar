@@ -1204,6 +1204,24 @@ class BusIntegrationTests(unittest.TestCase):
             report = harness.stop()
             self.assertEqual(report["protocol_errors"], [])
 
+    def test_a_lost_reply_after_a_wake_is_queried_again(self):
+        device = FakePairedDevice(kind=0x03, battery=50)
+        bus = FakeHidBus([FakeNode(b"/dev/sl2", 0xC54D, device)])
+        with DaemonHarness(bus) as harness:
+            harness.start_device(0xC54D, 0xC09B, "mouse", 10)
+            harness.wait_for_state("mouse", "50\n1\n0\n")
+            harness.wait_for_open(b"/dev/sl2")
+            bus.emit_link(b"/dev/sl2", off=True)
+            harness.wait_for_state("mouse", "0\n0\n0\n")
+            bus.intercept_next(
+                b"/dev/sl2",
+                lambda cmd: cmd[0] == 0x11 and cmd[2] == device.battery_index,
+                lambda _request, _reply: [])
+            bus.emit_link(b"/dev/sl2", off=False)
+            harness.wait_for_state("mouse", "50\n1\n0\n", timeout=8.0)
+            report = harness.stop()
+            self.assertEqual(report["protocol_errors"], [])
+
     def test_the_retry_delay_doubles_up_to_its_cap(self):
         monitor = load_monitor_module(FakeHidBus([]))
         delays = [monitor.REQUERY_FIRST_DELAY]
