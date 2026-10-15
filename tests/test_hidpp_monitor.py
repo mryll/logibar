@@ -1210,6 +1210,43 @@ class BusIntegrationTests(unittest.TestCase):
             report = harness.stop()
             self.assertEqual(report["protocol_errors"], [])
 
+    def test_a_cable_that_connects_during_the_requery_keeps_its_reading(self):
+        # After a cable unplug the wireless monitor re-queries the receiver.
+        # If the cable comes back while that query is in flight, the late
+        # wireless reading must not replace the cable one. The wired monitor
+        # is played by hand so the interleaving is fixed.
+        bus = FakeHidBus([
+            FakeNode(b"/dev/sl2", 0xC54D,
+                     FakePairedDevice(kind=0x03, battery=50)),
+        ])
+        with DaemonHarness(bus) as harness:
+            lock = threading.Lock()
+            state = harness._fresh_state(0xC54D, 0xC09B)
+            harness.start_wireless(0xC54D, "mouse", 10, state=state, state_lock=lock)
+            harness.wait_for_state("mouse", "50\n1\n0\n")
+            harness.wait_for_open(b"/dev/sl2")
+            time.sleep(0.3)  # let the startup cycle finish its reads
+
+            gate = bus.hold_responses(b"/dev/sl2", 1, is_root_lookup)
+            with lock:
+                state['wired_just_disconnected'] = True
+            gate.wait_until_full(timeout=5)
+
+            with lock:
+                state['wired_connected'] = True
+                harness.module.write_state("mouse", 77, True, True, 10, state)
+            gate.release()
+
+            # The wireless monitor closes the receiver once it sees the
+            # cable, which is after the requery has published or not.
+            deadline = time.monotonic() + 5
+            while b"/dev/sl2" in bus.open_paths():
+                self.assertLess(time.monotonic(), deadline, "the receiver stayed open")
+                time.sleep(0.02)
+            self.assertEqual(harness.state_file("mouse").read_text(), "77\n1\n1\n")
+            report = harness.stop()
+            self.assertEqual(report["protocol_errors"], [])
+
     def test_link_events_toggle_the_published_state(self):
         bus = FakeHidBus([
             FakeNode(b"/dev/sl2", 0xC54D,

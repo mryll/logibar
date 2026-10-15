@@ -505,23 +505,26 @@ def disconnect_wireless(dev, name, waybar_signal, state, state_lock):
             write_state(name, 0, False, False, waybar_signal, state)
     return None
 
-def publish_wireless_battery(name, waybar_signal, state, state_lock, soc, charging, feat_idx, even_if_wired=False):
+def publish_wireless_battery(name, waybar_signal, state, state_lock, soc, charging, feat_idx):
+    # The cable check and the write share one hold of the state lock: a
+    # cable that connects while a wireless query is in flight wins, and the
+    # late wireless reading never replaces the cable one.
     with state_lock:
         state['wireless_connected'] = True
         state['battery'] = soc
         state['charging'] = charging
         state['feat_idx'] = feat_idx
-        if even_if_wired or not state.get('wired_connected'):
+        if not state.get('wired_connected'):
             write_state(name, soc, True, charging, waybar_signal, state)
 
-def requery_wireless_battery(dev, device_idx, name, waybar_signal, battery_feature, state, state_lock, even_if_wired=False):
+def requery_wireless_battery(dev, device_idx, name, waybar_signal, battery_feature, state, state_lock):
     feat_idx = get_feature_index(dev, device_idx, battery_feature)
     if not feat_idx:
         return False
     soc, charging = query_battery(dev, device_idx, feat_idx, battery_feature)
     if soc is None:
         return False
-    publish_wireless_battery(name, waybar_signal, state, state_lock, soc, charging, feat_idx, even_if_wired)
+    publish_wireless_battery(name, waybar_signal, state, state_lock, soc, charging, feat_idx)
     return True
 
 def drop_suspect_receiver(dev, wireless_pid, opened):
@@ -648,7 +651,7 @@ def monitor_wireless(wireless_pid, name, waybar_signal, battery_feature, state, 
 
             if consume_wired_disconnect(state, state_lock):
                 enable_notifications(dev)
-                requery_wireless_battery(dev, device_idx, name, waybar_signal, battery_feature, state, state_lock, even_if_wired=True)
+                requery_wireless_battery(dev, device_idx, name, waybar_signal, battery_feature, state, state_lock)
 
             # Blocking read with timeout - true event-driven
             r = dev.read(64, timeout_ms=1000)
