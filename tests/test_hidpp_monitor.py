@@ -373,7 +373,8 @@ class SharedEnumerationTests(unittest.TestCase):
         self.module.hid = types.SimpleNamespace(
             device=self.bus.device, enumerate=counting_enumerate)
         self._dir = tempfile.TemporaryDirectory()
-        self.hidraw = Path(self._dir.name)
+        self.hidraw = Path(self._dir.name) / "hidraw"
+        self.hidraw.mkdir()
         (self.hidraw / "hidraw0").touch()
         self.module.HIDRAW_CLASS_DIR = str(self.hidraw)
 
@@ -397,8 +398,13 @@ class SharedEnumerationTests(unittest.TestCase):
 
     def test_a_replug_under_the_same_name_scans_again(self):
         self.paths(0xC547)
-        (self.hidraw / "hidraw0").rename(self.hidraw / "keep")  # pins the inode
+        before = sorted(os.listdir(self.hidraw))
+        # Park the old file OUTSIDE the watched directory: it keeps its inode
+        # busy, so the new file cannot reuse it, and the names stay the same.
+        # Only the inode tells this replug apart.
+        (self.hidraw / "hidraw0").rename(Path(self._dir.name) / "old-node")
         (self.hidraw / "hidraw0").touch()        # new node, same name
+        self.assertEqual(sorted(os.listdir(self.hidraw)), before)
         self.paths(0xC547)
         self.assertEqual(len(self.scans), 2)
 
@@ -413,6 +419,21 @@ class SharedEnumerationTests(unittest.TestCase):
         self.paths(0xC547)
         self.paths(0xC547)
         self.assertEqual(len(self.scans), 2)
+
+    def test_the_harness_sees_a_fake_hotplug_whatever_the_host_has(self):
+        # The host's /sys/class/hidraw does not change when the fake bus
+        # does, so a harness that kept it would serve a stale scan.
+        bus = FakeHidBus([
+            FakeNode(b"/dev/receiver", 0xC547, FakePairedDevice(kind=0x03, battery=50)),
+        ])
+        with DaemonHarness(bus) as harness:
+            class_dir = Path(harness.module.HIDRAW_CLASS_DIR)
+            self.assertEqual(class_dir.parent, Path(harness._tmp.name))
+            self.assertFalse(class_dir.exists())
+            self.assertEqual(len(harness.module.safe_enumerate(0x046D, 0xC547)), 1)
+            node = FakeNode(b"/dev/second", 0xC547, FakePairedDevice(kind=0x00, battery=50))
+            bus.nodes[node.path] = node
+            self.assertEqual(len(harness.module.safe_enumerate(0x046D, 0xC547)), 2)
 
 
 class StateAggregationTests(unittest.TestCase):

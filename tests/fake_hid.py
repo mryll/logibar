@@ -20,6 +20,7 @@ matches a physical device.
 """
 import importlib.util
 import itertools
+import os
 import subprocess
 import sys
 import tempfile
@@ -395,6 +396,11 @@ class DaemonHarness:
         self._tmp = tempfile.TemporaryDirectory()
         self.module = load_monitor_module(bus)
         self.module.STATE_DIR = self._tmp.name
+        # The daemon caches its scan until the host's /sys/class/hidraw
+        # changes, and that directory knows nothing of the fake bus. A path
+        # that does not exist makes every safe_enumerate scan the bus, so the
+        # result never depends on what is plugged into the test host.
+        self.module.HIDRAW_CLASS_DIR = os.path.join(self._tmp.name, "no-hidraw")
         self.module.subprocess = types.SimpleNamespace(
             run=lambda *args, **kwargs: None, DEVNULL=subprocess.DEVNULL)
         self.threads = []
