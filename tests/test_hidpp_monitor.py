@@ -873,6 +873,24 @@ class BusIntegrationTests(unittest.TestCase):
             report = harness.stop()
             self.assertEqual(report["protocol_errors"], [])
 
+    def test_a_cable_only_line_monitors_the_cable_alone(self):
+        # The G502 X LIGHTSPEED's receiver side is the c547 line; its own
+        # line has no receiver, so it must start no wireless monitor.
+        bus = FakeHidBus([
+            FakeNode(b"/dev/g502-wired", 0xC098, FakePairedDevice(
+                kind=0x03, battery=41, charging=True), device_idx=0xFF),
+        ])
+        with DaemonHarness(bus) as harness:
+            threads = harness.module.monitor_device(None, 0xC098, "mouse", 10)
+            harness.threads.extend(threads)
+            self.assertEqual(len(threads), 1)
+            harness.wait_for_state("mouse", "41\n1\n1\nG502 X LIGHTSPEED")
+            bus.emit_battery_event(b"/dev/g502-wired", battery=44, charging=True)
+            harness.wait_for_state("mouse", "44\n1\n1\nG502 X LIGHTSPEED")
+            report = harness.stop()
+            self.assertEqual(report["alive"], [])
+            self.assertEqual(report["protocol_errors"], [])
+
     def test_a_listed_wireless_pid_names_the_paired_mouse(self):
         # c547 pairs more than one mouse model, and the table names only one.
         # The receiver's pairing register says which mouse is paired. The
@@ -965,6 +983,8 @@ class DeviceCoverageTests(unittest.TestCase):
             kind=0x03, battery=41)),
         (0xC54D, 0xC09B): ("mouse", 10, FakePairedDevice(
             kind=0x03, battery=50)),
+        (None, 0xC098): ("mouse", 10, FakePairedDevice(
+            kind=0x03, battery=41, charging=True)),
     }
 
     def test_every_supported_device_has_an_emulated_sheet(self):

@@ -45,7 +45,7 @@ The same core drives both frontends, so a number reads the same on either one:
 | G Pro Wireless | Mouse | `logibar-hidpp-monitor` |
 | PRO X Superlight | Mouse | `logibar-hidpp-monitor` |
 | PRO X Superlight 2 | Mouse | `logibar-hidpp-monitor` |
-| G502 X LIGHTSPEED | Mouse | `logibar-hidpp-monitor` (wireless) |
+| G502 X LIGHTSPEED | Mouse | `logibar-hidpp-monitor` |
 | PRO X 2 LIGHTSPEED | Headset | `logibar-headset-monitor` |
 
 Other Logitech Lightspeed devices need only a new entry in a table. The section [Add a device](#add-a-device) gives the procedure.
@@ -494,7 +494,7 @@ To add another Logitech device to the keyboard and mouse daemon:
 
    Devices use UNIFIED_BATTERY (`0x1004`) by default. If the device instead exposes BATTERY_VOLTAGE (`0x1001`), add its receiver PID to `BATTERY_FEATURE_BY_RECEIVER`.
 
-   If the receiver PID is already in the table for another device of the same type (for example `c547` for the PRO X Superlight), do not add a second line. Add the wireless PID of the device to `MODEL_BY_WPID` instead. The daemon reads it from the receiver's pairing register (`0xb5`) and shows that model name. The kernel log shows the wireless PID, for example `logitech-hidpp-device 0003:046D:409F`.
+   If the receiver PID is already in the table for another device of the same type (for example `c547` for the PRO X Superlight), do not add a second line. Add the wireless PID of the device to `MODEL_BY_WPID` instead. The daemon reads it from the receiver's pairing register (`0xb5`) and shows that model name. For the cable, add a line with `None` as the wireless PID, as for the G502 X LIGHTSPEED. The kernel log shows the wireless PID, for example `logitech-hidpp-device 0003:046D:409F`.
 
 3. Add the device to `DEVICE_IDS`, `DEVICE_ICON` and `DEVICE_NAME` in `logibar-status`. `DEVICE_NAME` is only the generic fallback for a state file without a model line; the name on screen comes from the daemon.
 
