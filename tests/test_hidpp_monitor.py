@@ -32,6 +32,7 @@ from fake_hid import (  # noqa: E402
     FakeNode,
     FakePairedDevice,
     UNIFIED_BATTERY_FEATURE,
+    load_monitor_module,
 )
 
 
@@ -352,6 +353,68 @@ class SoftwareIdTests(unittest.TestCase):
             monitor.write_state = original_write_state
 
 
+class SharedEnumerationTests(unittest.TestCase):
+    """Every monitor thread polls safe_enumerate; the scan behind it must run
+    once per change of the hidraw node set, not once per call."""
+
+    def setUp(self):
+        self.bus = FakeHidBus([
+            FakeNode(b"/dev/receiver", 0xC547, FakePairedDevice(kind=0x03, battery=50)),
+            FakeNode(b"/dev/cable", 0xC098, FakePairedDevice(kind=0x03, battery=50),
+                     device_idx=0xFF),
+        ])
+        self.module = load_monitor_module(self.bus)
+        self.scans = []
+
+        def counting_enumerate(vid, pid):
+            self.scans.append((vid, pid))
+            return self.bus.enumerate(vid, pid)
+
+        self.module.hid = types.SimpleNamespace(
+            device=self.bus.device, enumerate=counting_enumerate)
+        self._dir = tempfile.TemporaryDirectory()
+        self.hidraw = Path(self._dir.name)
+        (self.hidraw / "hidraw0").touch()
+        self.module.HIDRAW_CLASS_DIR = str(self.hidraw)
+
+    def tearDown(self):
+        self._dir.cleanup()
+
+    def paths(self, pid):
+        return [d["path"] for d in self.module.safe_enumerate(0x046D, pid)]
+
+    def test_threads_share_one_scan_until_the_node_set_changes(self):
+        self.assertEqual(self.paths(0xC547), [b"/dev/receiver"])
+        self.assertEqual(self.paths(0xC098), [b"/dev/cable"])
+        self.assertEqual(self.paths(0xC54D), [])
+        self.assertEqual(self.scans, [(0x046D, 0)])
+
+        (self.hidraw / "hidraw1").touch()        # a node appears
+        self.paths(0xC547)
+        (self.hidraw / "hidraw1").unlink()       # and goes away
+        self.paths(0xC547)
+        self.assertEqual(len(self.scans), 3)
+
+    def test_a_replug_under_the_same_name_scans_again(self):
+        self.paths(0xC547)
+        (self.hidraw / "hidraw0").rename(self.hidraw / "keep")  # pins the inode
+        (self.hidraw / "hidraw0").touch()        # new node, same name
+        self.paths(0xC547)
+        self.assertEqual(len(self.scans), 2)
+
+    def test_an_unreadable_directory_scans_every_call(self):
+        self.module.HIDRAW_CLASS_DIR = str(self.hidraw / "missing")
+        self.paths(0xC547)
+        self.paths(0xC547)
+        self.assertEqual(len(self.scans), 2)
+
+    def test_an_old_scan_is_refreshed(self):
+        self.module.ENUMERATE_MAX_AGE = 0.0
+        self.paths(0xC547)
+        self.paths(0xC547)
+        self.assertEqual(len(self.scans), 2)
+
+
 class StateAggregationTests(unittest.TestCase):
     def test_wired_connect_cannot_be_overwritten_by_wireless_disconnect(self):
         original_state_dir = monitor.STATE_DIR
@@ -545,6 +608,15 @@ class FakeBusTests(unittest.TestCase):
         self.assertEqual(found[0]["usage_page"], 0xFF00)
         self.assertEqual(found[0]["serial_number"], "A1")
         self.assertEqual(bus.enumerate(0x046D, 0x9999), [])
+
+    def test_product_id_zero_matches_every_product(self):
+        bus = FakeHidBus([
+            FakeNode(b"/dev/a", 0xC547, FakePairedDevice(kind=0x00, battery=50)),
+            FakeNode(b"/dev/b", 0xC54D, FakePairedDevice(kind=0x03, battery=50)),
+        ])
+        self.assertEqual(
+            sorted(d["path"] for d in bus.enumerate(0x046D, 0)),
+            [b"/dev/a", b"/dev/b"])
 
     def test_every_open_descriptor_receives_its_own_copy(self):
         bus, first = single_device_bus(

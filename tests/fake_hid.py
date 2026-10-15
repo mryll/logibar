@@ -216,7 +216,8 @@ class FakeHidBus:
                  "serial_number": node.serial, "vendor_id": node.vid,
                  "product_id": node.pid}
                 for node in self.nodes.values()
-                if node.vid == vid and node.pid == pid
+                # hidapi: 0 matches any id
+                if vid in (0, node.vid) and pid in (0, node.pid)
             ]
 
     def device(self):

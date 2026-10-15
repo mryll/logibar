@@ -132,9 +132,38 @@ def write_state(name, battery, connected, charging, waybar_signal, state):
     except:
         pass
 
+# Every monitor thread polls safe_enumerate every 0.5 s while its device is
+# absent, and one hid.enumerate walks every hidraw node and parses its report
+# descriptor: about 20 ms of CPU on a desktop with 16 nodes. Ten threads made
+# that 40% of a core. So the threads share one scan of the vendor, and the
+# scan runs again only when the hidraw node set changes. The inode in the
+# fingerprint catches a replug that reuses the same hidrawN name. A rescan
+# also runs at least every ENUMERATE_MAX_AGE seconds, in case a change does
+# not show in the fingerprint.
+HIDRAW_CLASS_DIR = "/sys/class/hidraw"
+ENUMERATE_MAX_AGE = 5.0
+_enumeration = {"vid": None, "key": None, "at": 0.0, "devices": []}
+
+def hidraw_fingerprint():
+    """(name, inode) of every hidraw node, or None when the directory cannot
+    be read: then every call scans again, as before the cache."""
+    try:
+        with os.scandir(HIDRAW_CLASS_DIR) as entries:
+            return tuple(sorted((e.name, e.inode()) for e in entries))
+    except OSError:
+        return None
+
 def safe_enumerate(vid, pid):
     with hid_lock:
-        return [d for d in hid.enumerate(vid, pid) if d['usage_page'] == 0xff00]
+        key = hidraw_fingerprint()
+        now = time.monotonic()
+        cache = _enumeration
+        if (key is None or cache["vid"] != vid or cache["key"] != key
+                or now - cache["at"] >= ENUMERATE_MAX_AGE):
+            # Product id 0 is hidapi's "any product".
+            cache["devices"] = [d for d in hid.enumerate(vid, 0) if d['usage_page'] == 0xff00]
+            cache["vid"], cache["key"], cache["at"] = vid, key, now
+        return [d for d in cache["devices"] if d['product_id'] == pid]
 
 def enable_notifications(dev):
     flags = FLAG_WIRELESS | FLAG_SOFTWARE_PRESENT
