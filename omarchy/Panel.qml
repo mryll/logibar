@@ -899,7 +899,7 @@ Panel {
 
       Text {
         id: statusLabel
-        text: section.lastKnown ? "Last known · not responding"
+        text: section.lastKnown ? "Last known"
           : (section.charging ? "Charging" : "On battery")
         textFormat: Text.PlainText
         color: section.charging ? root.mix(root.dim, root.foreground, 0.6) : root.dim

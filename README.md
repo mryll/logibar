@@ -398,7 +398,7 @@ Change `padding` and `margin` in `~/.config/waybar/style.css`:
 | Field | Meaning |
 |---|---|
 | `devices[].state` | `ok`, `warning`, `critical`, `last_known`, or `disconnected` |
-| `devices[].last_known_battery`, `last_seen_at` | On receiver-discovered devices, the recent battery and time of the last successful query; null when never seen or expired |
+| `devices[].last_known_battery`, `last_seen_at` | On receiver-discovered devices, the last-known battery (when not responding) and time of the last successful query; null when never seen or expired |
 | `devices[].updated_at` | The time when the daemon last wrote this device, in ISO-8601 |
 | `aggregate` | The device with the lowest charge, and the state of the group |
 | `palette` | The colors of the gauge, after the theme and the flags |

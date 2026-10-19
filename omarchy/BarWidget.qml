@@ -8,8 +8,8 @@ import qs.Ui
 // --json), the state-file watchers, and the detail panel live in Panel.qml
 // (loaded once, shared identity for the bar's popout coordinator).
 //
-// Bar face: icon and percentage for each connected device, with a charge
-// glyph when needed. The panel controls the shared color and tooltip.
+// Bar face: current readings and individually dimmed recent last-known values.
+// A charging glyph appears only while a device responds.
 BarWidget {
   id: root
   moduleName: "mryll.logibar"
@@ -92,7 +92,8 @@ BarWidget {
     fixedWidth: vertical ? -1 : Math.max(12, faceRow.implicitWidth + scaledHorizontalMargin * 2)
     foreground: root.panelItem ? root.panelItem.barColor
       : (root.bar ? root.bar.barForeground : Commons.Color.foreground)
-    // Dim ONLY when there is no value to show. A failed poll behind good data
+    // Dim the icon-only face when every value is last known. In a horizontal
+    // bar each device has its own opacity. A failed poll behind good data
     // used to drop the whole face to 45% opacity, which restated the error in
     // the same channel the battery ramp already uses — the percentage read as a
     // different color depending on whether the last read succeeded, and it
