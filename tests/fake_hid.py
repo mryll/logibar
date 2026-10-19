@@ -50,7 +50,7 @@ class FakePairedDevice:
     def __init__(self, kind, battery_feature=UNIFIED_BATTERY_FEATURE,
                  battery=None, voltage=None, charging=False, awake=True,
                  name_index=0x03, battery_index=None, wpid=None,
-                 pairing_slot=1):
+                 pairing_slot=1, name="Fake Logitech", legacy_level=None):
         if battery_feature not in _DEFAULT_BATTERY_INDEX:
             raise ValueError(f"unsupported battery feature 0x{battery_feature:04x}")
         if battery_index is None:
@@ -71,6 +71,8 @@ class FakePairedDevice:
         self.battery_index = battery_index
         self.wpid = wpid
         self.pairing_slot = pairing_slot
+        self.name = name
+        self.legacy_level = legacy_level
 
     def feature_index(self, feature_id):
         known = {DEVICE_NAME_FEATURE: self.name_index,
@@ -83,12 +85,19 @@ class FakePairedDevice:
             return None, None  # HID++ 1.0 set-register (enable_notifications)
         if len(cmd) >= 5 and cmd[0] == 0x10 and cmd[1] == 0xff and cmd[2] == 0x83:
             # The receiver answers its own registers, awake device or not.
+            if 0x40 <= cmd[4] <= 0x45:
+                return self._pairing_name_report(cmd), None
             return self._pairing_info_report(cmd), None
         if not self.awake:
             return None, None
+        if self.legacy_level is not None and len(cmd) >= 4 and cmd[2] == 0x81:
+            if cmd[3] == 0x0d:
+                return bytes([0x10, cmd[1], 0x81, 0x0d, self.legacy_level, 0,
+                              0x50 if self.charging else 0x30]), None
+            return None, None
         if len(cmd) >= 7 and cmd[0] == 0x10 and cmd[2] == 0x00:
             feature_id = cmd[4] << 8 | cmd[5]
-            index = self.feature_index(feature_id)
+            index = 0 if self.legacy_level is not None else self.feature_index(feature_id)
             return bytes([cmd[0], cmd[1], 0x00, cmd[3], index, 0x00, 0x00]), None
         if len(cmd) >= 4 and cmd[0] == 0x11 and cmd[2] == self.name_index:
             return self._name_feature_report(cmd)
@@ -102,14 +111,29 @@ class FakePairedDevice:
         sub = 0x20 + self.pairing_slot - 1
         if cmd[3] != 0xb5 or cmd[4] != sub or self.wpid is None:
             return bytes([0x10, 0xff, 0x8f, 0x83, cmd[3], 0x02, 0x00])
+        pair_kind = 0x01 if self.kind == 0x00 else 0x02
         return bytes([0x11, 0xff, 0x83, 0xb5, sub, 0x07, 0x08,
-                      self.wpid >> 8, self.wpid & 0xff, 0x11, 0x00, 0x02]
+                      self.wpid >> 8, self.wpid & 0xff, 0x11, 0x00, pair_kind]
                      + [0x00] * 8)
 
+    def _pairing_name_report(self, cmd):
+        sub = 0x40 + self.pairing_slot - 1
+        if cmd[4] != sub or self.wpid is None:
+            return bytes([0x10, 0xff, 0x8f, 0x83, cmd[3], 0x02, 0x00])
+        name = self.name.encode('ascii')[:14]
+        return bytes([0x11, 0xff, 0x83, 0xb5, sub, len(name)]) + name
+
     def _name_feature_report(self, cmd):
-        if cmd[3] >> 4 != 0x2:  # only getDeviceType (function 2)
-            return None, f"unsupported DEVICE_NAME function byte 0x{cmd[3]:02x}"
-        return bytes([0x11, cmd[1], cmd[2], cmd[3], self.kind, 0x00, 0x00]), None
+        function = cmd[3] >> 4
+        if function == 0x2:
+            return bytes([0x11, cmd[1], cmd[2], cmd[3], self.kind, 0x00, 0x00]), None
+        if function == 0x0:
+            return bytes([0x11, cmd[1], cmd[2], cmd[3], len(self.name.encode()), 0, 0]), None
+        if function == 0x1:
+            offset = cmd[4]
+            return bytes([0x11, cmd[1], cmd[2], cmd[3]]) + self.name.encode()[offset:offset + 16], None
+        return None, f"unsupported DEVICE_NAME function byte 0x{cmd[3]:02x}"
+
 
     def _battery_report(self, cmd):
         function = cmd[3] >> 4
@@ -138,6 +162,24 @@ class FakePairedDevice:
         flags = 0x80 if self.charging else 0x00
         return bytes([0x11, device_idx, self.battery_index, 0x00,
                       self.voltage >> 8, self.voltage & 0xff, flags])
+
+
+class FakeReceiver:
+    """A receiver with independent paired slots on one hidraw node."""
+
+    def __init__(self, devices):
+        self.devices = devices
+
+    def respond(self, cmd):
+        if len(cmd) >= 5 and cmd[1] == 0xff and cmd[2] == 0x83:
+            sub = cmd[4]
+            slot = sub - (0x40 if sub >= 0x40 else 0x20) + 1
+            device = self.devices.get(slot)
+            if device:
+                return device.respond(cmd)
+            return bytes([0x10, 0xff, 0x8f, 0x83, cmd[3], 0x02, 0x00]), None
+        device = self.devices.get(cmd[1])
+        return device.respond(cmd) if device else (None, None)
 
 
 class FakeNode:

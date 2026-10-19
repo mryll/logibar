@@ -14,7 +14,7 @@
 #   default     waybar JSON for a single combined module
 #   --json      structured document (schema_version 1): devices[] + aggregate
 #   --watch     stream waybar JSON, one line per state change (needs inotifywait)
-#   --devices   comma-separated subset of: keyboard,mouse,headset (default: all)
+#   --devices   comma-separated subset of: keyboard,mouse,headset,other (default: all)
 #   --tooltip-font FONT
 #               font family (or Pango family list) the tooltip is pinned to.
 #               Default: "JetBrainsMono Nerd Font Mono, JetBrainsMono Nerd
@@ -90,10 +90,10 @@ MAX_STATE_BYTES=$((64 * 1024))
 
 # Device registry — ids, Nerd Font identity glyphs, display names.
 DEVICE_IDS=(keyboard mouse headset)
-declare -A DEVICE_ICON=([keyboard]="󰌌" [mouse]="󰍽" [headset]="󰋎")
+declare -A DEVICE_ICON=([keyboard]="󰌌" [mouse]="󰍽" [headset]="󰋎" [other]="󰂯")
 # Generic names: the fallback when a state file has no model line (an older
 # daemon) or the line is not a plain model name.
-declare -A DEVICE_NAME=([keyboard]="G915 TKL" [mouse]="Logitech mouse" [headset]="PRO X 2 Headset")
+declare -A DEVICE_NAME=([keyboard]="G915 TKL" [mouse]="Logitech mouse" [headset]="PRO X 2 Headset" [other]="Logitech device")
 # The model is text somebody else writes: printable ASCII, 48 characters at
 # most, or the generic name stays.
 MODEL_RE='^[A-Za-z0-9 ._()+/-]{1,48}$'
@@ -185,6 +185,7 @@ WATCH=false
 PLAIN_SURFACES=""   # "" | all | bar | tooltip — which surfaces drop color
 _nc=""
 DEVICES=("${DEVICE_IDS[@]}")
+REQUESTED_ALL=true
 # --help / -h: the reference the user needs is already the header comment of
 # this file, so print that rather than a second copy that can drift from it.
 # The block runs from the "# Usage:" line to the first line that is not a
@@ -204,6 +205,7 @@ while [[ $# -gt 0 ]]; do
         --watch) WATCH=true; shift ;;
         --devices)
             [[ $# -ge 2 ]] || cli_error "--devices requires a value"
+            REQUESTED_ALL=false
             IFS=',' read -r -a DEVICES <<< "$2"
             for _d in "${DEVICES[@]}"; do
                 [[ -n "${DEVICE_ICON[$_d]}" ]] || cli_error "unknown device: $_d"
@@ -242,6 +244,7 @@ while [[ $# -gt 0 ]]; do
         *) cli_error "Unknown option: $1" ;;
     esac
 done
+REQUESTED_KINDS=("${DEVICES[@]}")
 
 # https://no-color.org — any non-empty NO_COLOR means monochrome everywhere,
 # but an explicit --no-color=... is the more specific instruction and wins
@@ -264,43 +267,83 @@ $JSON_MODE && $WATCH && cli_error "--watch only makes sense in waybar mode"
 
 # --- Read state files into parallel arrays ---
 # Sets: BATTERY[id] CONNECTED[id] CHARGING[id] STATE[id] UPDATED[id] NAME[id]
-declare -A BATTERY CONNECTED CHARGING STATE UPDATED NAME
+declare -A BATTERY CONNECTED CHARGING STATE UPDATED NAME DEVICE_KIND
+DYNAMIC_REGISTRY=false
+kind_requested() {
+    local requested
+    $REQUESTED_ALL && return 0
+    for requested in "${REQUESTED_KINDS[@]}"; do
+        [[ "$requested" == "$1" ]] && return 0
+    done
+    return 1
+}
+
+load_dynamic_registry() {
+    DEVICES=("${REQUESTED_KINDS[@]}")
+    DYNAMIC_REGISTRY=false
+    local blob header id kind extra
+    blob=$(read_bounded "$STATE_DIR/receiver-devices" 4096) || return
+    IFS= read -r header <<< "$blob"
+    [[ "$header" == 'logibar-receivers-v1' ]] || return
+    DYNAMIC_REGISTRY=true
+    DEVICES=()
+    local -A seen=()
+    while IFS=$'\t' read -r id kind extra; do
+        [[ "$id" =~ ^rx-[a-f0-9]{8}-[1-6]$ ]] || continue
+        [[ "$kind" == keyboard || "$kind" == mouse || "$kind" == headset || "$kind" == other ]] || continue
+        [[ -z "$extra" && -z "${seen[$id]:-}" ]] || continue
+        kind_requested "$kind" || continue
+        seen[$id]=1
+        DEVICES+=("$id")
+        DEVICE_KIND[$id]="$kind"
+        DEVICE_ICON[$id]="${DEVICE_ICON[$kind]}"
+        DEVICE_NAME[$id]="${DEVICE_NAME[$kind]}"
+    done < <(printf '%s\n' "$blob" | tail -n +2)
+}
+
+read_one_device() {
+    local id="$1" file battery connected charging model blob
+    file="$STATE_DIR/$id"
+    BATTERY[$id]=""; CONNECTED[$id]=0; CHARGING[$id]=0; STATE[$id]="disconnected"; UPDATED[$id]=""
+    NAME[$id]="${DEVICE_NAME[$id]}"
+    blob=$(read_bounded "$file" "$MAX_STATE_BYTES") || return
+    battery=""; connected=""; charging=""; model=""
+    { IFS= read -r battery; IFS= read -r connected; IFS= read -r charging; IFS= read -r model; } <<< "$blob"
+    model=${model:0:64}
+    is_plain_model "$model" && NAME[$id]="$model"
+    UPDATED[$id]=$(date -Iseconds -d "@$(stat -c %Y "$file" 2>/dev/null || echo 0)" 2>/dev/null)
+    is_battery_digits "$battery" || return
+    battery=$(( 10#$battery ))
+    [[ "$connected" == "1" ]] || return
+    (( battery > 100 )) && battery=100
+    BATTERY[$id]="$battery"
+    CONNECTED[$id]=1
+    [[ "$charging" == "1" ]] && CHARGING[$id]=1
+    if   (( battery <= CRITICAL_LEVEL )); then STATE[$id]="critical"
+    elif (( battery <= WARNING_LEVEL ));  then STATE[$id]="warning"
+    else STATE[$id]="ok"; fi
+}
+
 read_devices() {
-    local id file battery connected charging model blob
+    local id kind found
+    load_dynamic_registry
     for id in "${DEVICES[@]}"; do
-        file="$STATE_DIR/$id"
-        BATTERY[$id]=""; CONNECTED[$id]=0; CHARGING[$id]=0; STATE[$id]="disconnected"; UPDATED[$id]=""
-        NAME[$id]="${DEVICE_NAME[$id]}"
-        # One bounded read instead of three `sed -n Np`: it also collapses
-        # three opens of a file somebody else writes into one, so the state
-        # cannot change shape between the first line and the third.
-        blob=$(read_bounded "$file" "$MAX_STATE_BYTES") || continue
-        battery=""; connected=""; charging=""; model=""
-        { IFS= read -r battery; IFS= read -r connected; IFS= read -r charging; IFS= read -r model; } <<< "$blob"
-        # Fourth line: the model the daemon matched. The slice bounds the
-        # regex before it runs; anything that is not a plain name keeps the
-        # generic one.
-        model=${model:0:64}
-        is_plain_model "$model" && NAME[$id]="$model"
-        UPDATED[$id]=$(date -Iseconds -d "@$(stat -c %Y "$file" 2>/dev/null || echo 0)" 2>/dev/null)
-        # Read in base 10: a leading zero (08) is bad octal, which made the
-        # severity checks fail and fall through to "ok".
-        is_battery_digits "$battery" || continue
-        battery=$(( 10#$battery ))
-        # `connected` is the only connection flag. A battery of 0 with the
-        # device connected is a real reading (the G915 TKL reports voltage,
-        # and a drained cell converts to 0%) — hiding it would silence the
-        # alarm at the exact moment it matters most.
-        if [[ "$connected" != "1" ]]; then
-            continue
-        fi
-        (( battery > 100 )) && battery=100
-        BATTERY[$id]="$battery"
-        CONNECTED[$id]=1
-        [[ "$charging" == "1" ]] && CHARGING[$id]=1
-        if   (( battery <= CRITICAL_LEVEL )); then STATE[$id]="critical"
-        elif (( battery <= WARNING_LEVEL ));  then STATE[$id]="warning"
-        else STATE[$id]="ok"; fi
+        read_one_device "$id"
+    done
+    $DYNAMIC_REGISTRY || return 0
+    # Preserve wired and headset readings when no paired receiver device of
+    # that kind is currently reporting a battery.
+    for kind in keyboard mouse headset; do
+        kind_requested "$kind" || continue
+        found=false
+        for id in "${DEVICES[@]}"; do
+            if [[ "${DEVICE_KIND[$id]:-}" == "$kind" && "${CONNECTED[$id]}" == "1" ]]; then
+                found=true; break
+            fi
+        done
+        $found && continue
+        read_one_device "$kind"
+        [[ "${CONNECTED[$kind]}" == "1" ]] && DEVICES+=("$kind")
     done
 }
 
@@ -328,12 +371,15 @@ emit_json() {
     for id in "${DEVICES[@]}"; do
         rows=$(jq -c \
             --arg id "$id" --arg name "${NAME[$id]}" --arg state "${STATE[$id]}" \
+            --arg kind "${DEVICE_KIND[$id]:-$id}" \
+            --argjson paired "$([[ "$id" == rx-* ]] && echo true || echo false)" \
             --arg battery "${BATTERY[$id]}" --arg updated "${UPDATED[$id]}" \
             --argjson connected "$([[ "${CONNECTED[$id]}" == "1" ]] && echo true || echo false)" \
             --argjson charging "$([[ "${CHARGING[$id]}" == "1" ]] && echo true || echo false)" \
             '. + [{id:$id, name:$name, battery:(if $battery == "" then null else ($battery|tonumber) end),
                    connected:$connected, charging:$charging, state:$state,
-                   updated_at:(if $updated == "" then null else $updated end)}]' <<< "$rows")
+                   updated_at:(if $updated == "" then null else $updated end)}
+                   + (if $paired then {kind:$kind, paired:true} else {} end)]' <<< "$rows")
     done
     # The palette travels with the data so every frontend paints the same
     # gauge: theme colors resolved here once, CLI --color-* overrides applied.

@@ -22,6 +22,7 @@
       "showKeyboard": true,
       "showMouse": true,
       "showHeadset": true,
+      "showOther": true,
       "colorMode": "full"
     },
     "schema": [
@@ -57,6 +58,13 @@
         "type": "boolean",
         "label": "Show headset",
         "description": "Battery of the PRO X 2 LIGHTSPEED headset.",
+        "defaultValue": true
+      },
+      {
+        "key": "showOther",
+        "type": "boolean",
+        "label": "Show other devices",
+        "description": "Show paired Logitech devices that are neither a keyboard, mouse, nor headset.",
         "defaultValue": true
       }
     ]

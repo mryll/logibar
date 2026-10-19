@@ -12,6 +12,8 @@ import subprocess
 import threading
 import tempfile
 import argparse
+import hashlib
+import re
 
 VID = 0x046d
 # Use XDG_RUNTIME_DIR for secure, atomic state files
@@ -85,6 +87,19 @@ BATTERY_FEATURE_BY_RECEIVER = {
 # the device index. Discover that slot rather than assuming slot 1.
 UNIFYING_WPID_BY_PID = {0x4069: 0x4069}
 UNIFYING_MAX_SLOTS = 6
+# Receiver identities are the only hardware list needed for discovery. Paired
+# peripherals are learned from the receiver's pairing register at runtime.
+# Bolt uses different pairing registers and is not in this HID++ 1.0 list.
+RECEIVER_SLOTS = {
+    0xc52b: 6, 0xc532: 6,  # Unifying
+    0xc539: 2, 0xc545: 2, 0xc547: 2, 0xc54d: 2,  # Lightspeed
+}
+PAIRING_KIND = {1: 'keyboard', 2: 'mouse', 3: 'keyboard', 8: 'mouse', 13: 'headset'}
+HIDPP20_KIND = {0: 'keyboard', 2: 'keyboard', 3: 'mouse', 4: 'mouse', 5: 'mouse'}
+DISCOVERY_SWID = 0x0a
+DISCOVERY_INTERVAL = 300
+DISCOVERY_MANIFEST = 'receiver-devices'
+MODEL_RE = re.compile(r'^[A-Za-z0-9 ._()+/-]{1,48}$')
 BATTERY_VOLTAGE_LEVELS = (
     (4186, 100),
     (4067, 90),
@@ -245,8 +260,8 @@ def is_pairing_error(r):
     request on the same node."""
     return r[0] == 0x10 and r[2] == 0x8f and r[3] == 0x83 and r[4] == REG_PAIRING_INFO
 
-def read_paired_wpid(dev, device_idx):
-    """Wireless PID of the device paired in slot device_idx, or None.
+def read_paired_info(dev, device_idx):
+    """Receiver pairing report for slot device_idx, or None.
 
     A HID++ 1.0 long-register READ (sub-id 0x83, never the 0x82 write) on
     the receiver: the answer is a long report (0x11) that echoes the register
@@ -270,11 +285,15 @@ def read_paired_wpid(dev, device_idx):
                 continue
             wpid = pairing_reply_wpid(r, sub)
             if wpid is not None:
-                return wpid
+                return r
             saw_error = saw_error or is_pairing_error(r)
     except Exception:
         pass
     return None
+
+def read_paired_wpid(dev, device_idx):
+    report = read_paired_info(dev, device_idx)
+    return pairing_reply_wpid(report, PAIRING_INFO_DEVICE_1 + device_idx - 1) if report else None
 
 def find_paired_index(dev, wpid):
     """Find a Unifying device's current slot on its HID++ hidraw node."""
@@ -299,7 +318,8 @@ def refresh_paired_model(dev, device_idx, name, state, state_lock, keep_on_no_an
     with state_lock:
         state['_paired_model'] = paired_model(name, wpid)
 
-def get_feature_index(dev, device_idx, feature_id, swid=SWID_MONITOR, retries=3):
+def get_feature_index(dev, device_idx, feature_id, swid=SWID_MONITOR, retries=3,
+                      read_count=20):
     """Get a HID++ feature index with retries. ROOT getFeature is function 0,
     so the request byte is the bare software id, and only a response echoing
     that id belongs to this caller."""
@@ -308,7 +328,7 @@ def get_feature_index(dev, device_idx, feature_id, swid=SWID_MONITOR, retries=3)
             flush_buffer(dev)
             cmd = [0x10, device_idx, 0x00, swid, feature_id >> 8, feature_id & 0xff, 0x00]
             dev.write(cmd)
-            for _ in range(20):
+            for _ in range(read_count):
                 r = dev.read(64, timeout_ms=50)
                 if r and len(r) > 4 and r[0] in [0x10, 0x11] and r[1] == device_idx and r[2] == 0x00 and r[3] == swid:
                     return r[4]
@@ -859,6 +879,169 @@ def monitor_device(wireless_pid, wired_pid, name, waybar_signal, model=None):
         threads.append(t_wired)
     return threads
 
+def receiver_codename(dev, slot):
+    """Read the receiver's paired-device name, including for sleeping devices."""
+    sub = 0x40 + slot - 1
+    try:
+        flush_buffer(dev)
+        dev.write([0x10, RECEIVER_IDX, 0x83, REG_PAIRING_INFO, sub, 0, 0])
+        for _ in range(12):
+            r = dev.read(64, timeout_ms=50)
+            if (r and len(r) > 6 and r[0] == 0x11 and r[1] == RECEIVER_IDX
+                    and (r[2], r[3], r[4]) == (0x83, REG_PAIRING_INFO, sub)):
+                length = min(r[5], 48)
+                return bytes(r[6:6 + length]).split(b'\x00', 1)[0].decode('ascii', errors='ignore')
+    except Exception:
+        pass
+    return ''
+
+def feature_request(dev, slot, index, function, payload=(), swid=DISCOVERY_SWID):
+    request = function | swid
+    try:
+        flush_buffer(dev)
+        dev.write([0x11, slot, index, request] + list(payload)[:16] + [0] * (16 - min(16, len(payload))))
+        for _ in range(12):
+            r = dev.read(64, timeout_ms=50)
+            if (r and len(r) >= 5 and r[0] in (0x10, 0x11)
+                    and (r[1], r[2], r[3]) == (slot, index, request)):
+                return r
+    except Exception:
+        pass
+    return None
+
+def hidpp20_identity(dev, slot):
+    index = get_feature_index(dev, slot, DEVICE_NAME_FEATURE,
+                              swid=DISCOVERY_SWID, retries=1, read_count=4)
+    if not index:
+        return None, ''
+    kind_reply = feature_request(dev, slot, index, 0x20)
+    kind = HIDPP20_KIND.get(kind_reply[4], 'other') if kind_reply else None
+    length_reply = feature_request(dev, slot, index, 0x00)
+    name = bytearray()
+    if length_reply:
+        length = min(length_reply[4], 48)
+        while len(name) < length:
+            part = feature_request(dev, slot, index, 0x10, [len(name)])
+            if not part or len(part) <= 4:
+                break
+            name.extend(part[4:4 + min(length - len(name), len(part) - 4)])
+    return kind, bytes(name).decode('utf-8', errors='replace')
+
+def hidpp10_battery(dev, slot):
+    """Legacy 0x0d percentage or 0x07 approximate charge level."""
+    for register in (0x0d, 0x07):
+        try:
+            flush_buffer(dev)
+            dev.write([0x10, slot, 0x81, register, 0, 0, 0])
+            for _ in range(4):
+                r = dev.read(64, timeout_ms=50)
+                if not r or len(r) < 7 or r[0] not in (0x10, 0x11):
+                    continue
+                if (r[1], r[2], r[3]) != (slot, 0x81, register):
+                    continue
+                if register == 0x0d and 0 <= r[4] <= 100:
+                    return r[4], (r[6] & 0xf0) == 0x50
+                if register == 0x07 and r[4] in (1, 3, 5, 7):
+                    return {1: 5, 3: 20, 5: 50, 7: 90}[r[4]], (r[5] & 0x21) == 0x21
+        except Exception:
+            pass
+    return None, None
+
+def generic_battery(dev, slot):
+    for feature in (UNIFIED_BATTERY_FEATURE, BATTERY_STATUS_FEATURE,
+                    BATTERY_VOLTAGE_FEATURE):
+        index = get_feature_index(dev, slot, feature,
+                                  swid=DISCOVERY_SWID, retries=1, read_count=4)
+        if not index:
+            continue
+        battery, charging = query_battery(dev, slot, index, feature,
+                                          swid=DISCOVERY_SWID)
+        if battery is not None:
+            return battery, charging
+    return hidpp10_battery(dev, slot)
+
+def model_name(name, kind, wpid):
+    name = name.strip()
+    return name if MODEL_RE.fullmatch(name) else f'Logitech {kind} {wpid:04X}'
+
+def discover_receiver_devices():
+    """Enumerate every paired slot on supported receiver families."""
+    devices = []
+    for pid, max_slots in RECEIVER_SLOTS.items():
+        paths = {node['path'] for node in safe_enumerate(VID, pid)}
+        for path in sorted(paths):
+            dev = hid.device()
+            try:
+                dev.open_path(path)
+                receiver_id = hashlib.blake2s(path, digest_size=4).hexdigest()
+                for slot in range(1, max_slots + 1):
+                    report = read_paired_info(dev, slot)
+                    if not report:
+                        continue
+                    wpid = pairing_reply_wpid(report, PAIRING_INFO_DEVICE_1 + slot - 1)
+                    kind = PAIRING_KIND.get(report[11] & 0x0f, 'other') if len(report) > 11 else 'other'
+                    name = receiver_codename(dev, slot)
+                    feature_kind, feature_name = hidpp20_identity(dev, slot)
+                    kind = feature_kind or kind
+                    name = name or feature_name
+                    battery, charging = generic_battery(dev, slot)
+                    devices.append({
+                        'id': f'rx-{receiver_id}-{slot}', 'kind': kind,
+                        'name': model_name(name, kind, wpid), 'wpid': wpid,
+                        'battery': battery, 'charging': bool(charging) if battery is not None else False,
+                    })
+            except Exception as error:
+                print(f'logibar-hidpp-monitor: receiver {pid:04x} scan failed: {error}',
+                      file=sys.stderr)
+            finally:
+                close_quietly(dev)
+    return devices
+
+def atomic_state_write(path, content):
+    os.makedirs(STATE_DIR, exist_ok=True, mode=0o700)
+    fd, tmp_path = tempfile.mkstemp(dir=STATE_DIR)
+    try:
+        os.write(fd, content.encode('utf-8'))
+        os.close(fd)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+def publish_discovered(devices):
+    for device in devices:
+        battery = device['battery']
+        content = (f"{battery if battery is not None else 0}\n"
+                   f"{1 if battery is not None else 0}\n"
+                   f"{1 if device['charging'] else 0}\n{device['name']}")
+        atomic_state_write(os.path.join(STATE_DIR, device['id']), content)
+    lines = ['logibar-receivers-v1']
+    lines.extend(f"{device['id']}\t{device['kind']}" for device in devices)
+    atomic_state_write(os.path.join(STATE_DIR, DISCOVERY_MANIFEST), '\n'.join(lines) + '\n')
+
+def scan_receivers():
+    devices = discover_receiver_devices()
+    publish_discovered(devices)
+    return devices
+
+def receiver_scan_loop():
+    while running:
+        try:
+            scan_receivers()
+        except Exception as error:
+            print(f'logibar-hidpp-monitor: discovery failed: {error}', file=sys.stderr)
+        for _ in range(DISCOVERY_INTERVAL):
+            if not running:
+                return
+            time.sleep(1)
+
 def refresh_source(pid, name, battery_feature, wired=False):
     """Read one receiver or cable directly, independently of daemon cache."""
     nodes = safe_enumerate(VID, pid)
@@ -919,16 +1102,20 @@ def main():
     parser.add_argument('--devices', default='keyboard,mouse', help='comma-separated devices to refresh')
     args = parser.parse_args()
     if args.refresh:
-        names = set(args.devices.split(',')) & {'keyboard', 'mouse'}
+        names = set(args.devices.split(',')) & {'keyboard', 'mouse', 'headset', 'other'}
         if not names:
-            parser.error('--refresh requires keyboard and/or mouse')
-        return refresh_once(names)
+            parser.error('--refresh requires at least one device kind')
+        discovered = scan_receivers()
+        legacy_result = refresh_once(names & {'keyboard', 'mouse'}) if names & {'keyboard', 'mouse'} else 1
+        return 0 if discovered or legacy_result == 0 else 1
 
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
     os.makedirs(STATE_DIR, exist_ok=True, mode=0o700)
 
     threads = []
+    scanner = threading.Thread(target=receiver_scan_loop, daemon=True)
+    scanner.start()
     for wireless_pid, wired_pid, name, waybar_signal, model in DEVICES:
         threads.extend(monitor_device(wireless_pid, wired_pid, name, waybar_signal, model))
 

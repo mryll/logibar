@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import importlib.util
+import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -32,6 +34,7 @@ from fake_hid import (  # noqa: E402
     FakeHidBus,
     FakeNode,
     FakePairedDevice,
+    FakeReceiver,
     UNIFIED_BATTERY_FEATURE,
     load_monitor_module,
 )
@@ -1503,7 +1506,7 @@ class HeadsetStateFileTests(unittest.TestCase):
     def test_the_headset_publishes_its_model_only_while_connected(self):
         with tempfile.TemporaryDirectory() as tmp:
             mod = self._load(tmp)
-            mod.subprocess.run = lambda *a, **k: None   # no pkill from a test
+            mod.subprocess = types.SimpleNamespace(run=lambda *a, **k: None)  # no pkill
             state = Path(tmp) / "logibar" / "headset"
             mod.write_state(64, True, False)
             self.assertEqual(state.read_text(), "64\n1\n0\nPRO X 2 LIGHTSPEED")
@@ -1530,7 +1533,7 @@ class ForcedRefreshTests(unittest.TestCase):
         ])
         mod = load_monitor_module(bus)
         mod.DEVICES = [mod.DEVICES[0], mod.DEVICES[2]]
-        mod.subprocess.run = lambda *a, **k: None
+        mod.subprocess = types.SimpleNamespace(run=lambda *a, **k: None)
         with tempfile.TemporaryDirectory() as tmp:
             mod.STATE_DIR = tmp
             self.assertEqual(mod.refresh_once({"keyboard", "mouse"}), 0)
@@ -1545,6 +1548,70 @@ class ForcedRefreshTests(unittest.TestCase):
         requests = [entry[4] for entry in bus.log if entry[0] == "write"]
         self.assertTrue(any(cmd[0] == 0x11 and cmd[3] == mod.SWID_REFRESH
                             for cmd in requests))
+        self.assertEqual(bus.protocol_errors, [])
+
+
+class ReceiverDiscoveryTests(unittest.TestCase):
+    def test_multiple_models_and_legacy_device_share_receiver(self):
+        receiver = FakeReceiver({
+            1: FakePairedDevice(kind=0x00, battery=50, legacy_level=73,
+                                wpid=0x400F, pairing_slot=1, name="K750"),
+            2: FakePairedDevice(kind=0x03, battery=60, wpid=0x4041,
+                                pairing_slot=2, name="MX Master"),
+            3: FakePairedDevice(kind=0x03, battery=40, awake=False,
+                                wpid=0x1020, pairing_slot=3, name="M215"),
+            4: FakePairedDevice(kind=0x03, battery_feature=BATTERY_STATUS_FEATURE,
+                                battery=55, charging=True, wpid=0x4069,
+                                pairing_slot=4, name="MX Master 2S"),
+            5: FakePairedDevice(kind=0x06, battery=45, wpid=0x9999,
+                                pairing_slot=5, name="Presenter"),
+        })
+        lightspeed = FakeReceiver({
+            1: FakePairedDevice(kind=0x00, battery_feature=BATTERY_VOLTAGE_FEATURE,
+                                voltage=3989, wpid=0x408E, name="G915 TKL"),
+        })
+        bus = FakeHidBus([
+            FakeNode(b"/dev/unifying", 0xC52B, receiver),
+            FakeNode(b"/dev/lightspeed", 0xC545, lightspeed),
+        ])
+        mod = load_monitor_module(bus)
+        mod.RECEIVER_SLOTS = {0xC52B: 5, 0xC545: 1}
+        with tempfile.TemporaryDirectory() as tmp:
+            mod.STATE_DIR = os.path.join(tmp, "logibar")
+            devices = mod.scan_receivers()
+            self.assertEqual(len(devices), 6)
+            self.assertEqual([(d['name'], d['battery']) for d in devices], [
+                ("K750", 73), ("MX Master", 60), ("M215", None),
+                ("MX Master 2S", 55), ("Presenter", 45), ("G915 TKL", 80),
+            ])
+            self.assertEqual([d['kind'] for d in devices],
+                             ["keyboard", "mouse", "mouse", "mouse", "other", "keyboard"])
+            self.assertTrue(devices[3]['charging'])
+            self.assertEqual((Path(mod.STATE_DIR) / devices[3]['id']).read_text(),
+                             "55\n1\n1\nMX Master 2S")
+            env = os.environ.copy()
+            env['XDG_RUNTIME_DIR'] = tmp
+            with subprocess.Popen([str(SCRIPT.parent / 'logibar-status'), '--json'],
+                                  env=env, text=True, stdout=subprocess.PIPE) as proc:
+                raw, _ = proc.communicate()
+                self.assertEqual(proc.returncode, 0)
+            status = json.loads(raw)
+            self.assertEqual(status['aggregate']['connected_count'], 5)
+            self.assertEqual(len(status['devices']), 6)
+            self.assertEqual(status['devices'][2]['battery'], None)
+            self.assertTrue(status['devices'][2]['paired'])
+            with subprocess.Popen([str(SCRIPT.parent / 'logibar-status'), '--json',
+                                   '--devices', 'mouse'], env=env, text=True,
+                                  stdout=subprocess.PIPE) as proc:
+                raw, _ = proc.communicate()
+                self.assertEqual(proc.returncode, 0)
+            self.assertEqual(len(json.loads(raw)['devices']), 3)
+            with subprocess.Popen([str(SCRIPT.parent / 'logibar-status'), '--json',
+                                   '--devices', 'other'], env=env, text=True,
+                                  stdout=subprocess.PIPE) as proc:
+                raw, _ = proc.communicate()
+                self.assertEqual(proc.returncode, 0)
+            self.assertEqual(json.loads(raw)['devices'][0]['name'], 'Presenter')
         self.assertEqual(bus.protocol_errors, [])
 
 
