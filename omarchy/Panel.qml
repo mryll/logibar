@@ -85,16 +85,11 @@ Panel {
     var out = []
     for (var i = 0; i < status.devices.length; i++) {
       var d = status.devices[i]
-      if (d && ((d.connected === true && typeof d.battery === "number") || d.paired === true)) out.push(d)
+      if (d && d.connected === true && typeof d.battery === "number") out.push(d)
     }
-    return out.sort(function(a, b) { return Number(b.connected === true) - Number(a.connected === true) })
+    return out
   }
   readonly property int connectedCount: aggregate ? (aggregate.connected_count || 0) : 0
-  readonly property int pairedCount: {
-    var count = 0
-    for (var i = 0; i < deviceRows.length; i++) if (deviceRows[i].paired === true) count++
-    return count
-  }
 
   // Identity glyphs (same Nerd Font icons as the waybar renderers) and the
   // stepped battery glyphs, decile-mapped like the first-party power widget.
@@ -284,8 +279,7 @@ Panel {
   // there has never been data — an error must not look like "disconnected".
   readonly property string faceGlyph: {
     if (!hasData) return loadError !== "" ? "⚠" : ""
-    if (!aggregate || connectedCount === 0 || aggregate.worst_battery === null)
-      return deviceRows.length > 0 ? "󰂯" : ""
+    if (!aggregate || connectedCount === 0 || aggregate.worst_battery === null) return ""
     return batteryGlyph(aggregate.worst_battery, aggregate.any_charging === true)
   }
 
@@ -294,7 +288,6 @@ Panel {
     var parts = []
     for (var i = 0; i < deviceRows.length; i++) {
       var d = deviceRows[i]
-      if (d.connected !== true || typeof d.battery !== "number") continue
       parts.push((identityGlyphs[d.kind || d.id] || batteryGlyph(d.battery, d.charging === true))
         + " " + d.battery + "%" + (d.charging === true ? " 󰂅" : ""))
     }
@@ -319,7 +312,7 @@ Panel {
     var lines = []
     for (var i = 0; i < deviceRows.length; i++) {
       var d = deviceRows[i]
-      lines.push(d.name + ": " + (d.connected === true ? d.battery + "%" : "Unavailable")
+      lines.push(d.name + ": " + d.battery + "%"
         + (d.charging === true ? " · Charging" : ""))
     }
     if (fullRefreshing) lines.push("Refreshing device readings…")
@@ -680,10 +673,9 @@ Panel {
           PanelHero {
             width: parent.width
             title: "Logitech"
-            meta: root.pairedCount > 0
-              ? root.connectedCount + " active · " + root.pairedCount + " paired"
-              : (root.connectedCount > 0
-                ? root.connectedCount + (root.connectedCount === 1 ? " device" : " devices") : "")
+            meta: root.connectedCount > 0
+              ? root.connectedCount + (root.connectedCount === 1 ? " device" : " devices")
+              : ""
             foreground: root.foreground
             fontFamily: root.fontFamily
 
@@ -791,7 +783,6 @@ Panel {
     property var device: null
 
     readonly property int pct: device ? Math.round(Number(device.battery || 0)) : 0
-    readonly property bool available: device ? device.connected === true && typeof device.battery === "number" : false
     readonly property bool charging: device ? device.charging === true : false
 
     // What the meter is painting this frame, rounded exactly like the target
@@ -853,11 +844,10 @@ Panel {
 
       Text {
         id: valueLabel
-        text: section.available
-          ? (section.charging ? root.batteryGlyph(section.pct, true) + " " : "") + section.displayPct + "%"
-          : "—"
+        text: (section.charging ? root.batteryGlyph(section.pct, true) + " " : "")
+          + section.displayPct + "%"
         textFormat: Text.PlainText
-        color: section.available ? section.rampTint : root.dim
+        color: section.rampTint
         font.family: root.fontFamily
         font.pixelSize: Style.font.body
         font.bold: true
@@ -870,7 +860,6 @@ Panel {
       id: meter
       width: parent.width
       value: section.pct / 100
-      visible: section.available
     }
 
     Item {
@@ -879,7 +868,7 @@ Panel {
 
       Text {
         id: statusLabel
-        text: !section.available ? "Unavailable" : (section.charging ? "Charging" : "On battery")
+        text: section.charging ? "Charging" : "On battery"
         textFormat: Text.PlainText
         color: section.charging ? root.mix(root.dim, root.foreground, 0.6) : root.dim
         font.family: root.fontFamily
@@ -895,7 +884,7 @@ Panel {
         // use in theirs: clock glyph, "Updated HH:MM".
         text: {
           var at = root.updatedText(section.device ? section.device.updated_at : "")
-          return at !== "" ? (section.available ? "󰅐  Updated " : "󰅐  Checked ") + at : ""
+          return at !== "" ? "󰅐  Updated " + at : ""
         }
         textFormat: Text.PlainText
         color: root.dim

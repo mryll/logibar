@@ -331,13 +331,14 @@ read_devices() {
         read_one_device "$id"
     done
     $DYNAMIC_REGISTRY || return 0
-    # Preserve wired and headset readings when no paired receiver device of
-    # that kind is currently reporting a battery.
+    # Preserve legacy wired/headset readings when this receiver scan has no
+    # pairing of that kind. A sleeping paired mouse must not be replaced by
+    # an older category reading that still says it is connected.
     for kind in keyboard mouse headset; do
         kind_requested "$kind" || continue
         found=false
         for id in "${DEVICES[@]}"; do
-            if [[ "${DEVICE_KIND[$id]:-}" == "$kind" && "${CONNECTED[$id]}" == "1" ]]; then
+            if [[ "${DEVICE_KIND[$id]:-}" == "$kind" ]]; then
                 found=true; break
             fi
         done

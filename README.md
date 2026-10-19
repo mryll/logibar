@@ -29,7 +29,7 @@ The same core drives both frontends, so a number reads the same on either one:
 ## Features
 
 - **One widget for all devices.** The Omarchy bar shows each connected device's percentage; one click opens the panel and queries the keyboard and mouse directly. The Waybar face shows the device that needs attention first.
-- **Receiver discovery.** The HID++ monitor reads pairing slots on supported Unifying and Lightspeed receivers. Multiple keyboards or mice get separate rows, including paired devices that are currently unavailable.
+- **Receiver discovery.** The HID++ monitor reads pairing slots on supported Unifying and Lightspeed receivers. Multiple active keyboards or mice get separate rows.
 - **Fresh readings.** The existing device monitors listen for HID++ events. Receiver discovery runs at startup, every five minutes, and when the Omarchy widget is clicked.
 - **A real gauge.** The meters go from red at empty, through amber, to green at full. The colors come from your theme.
 - **Two frontends, one brain.** `logibar-status` makes every decision. Waybar and the Omarchy plugin only draw the result.
@@ -52,7 +52,7 @@ The same core drives both frontends, so a number reads the same on either one:
 
 The MX Master 2S support is specific to this fork. The upstream AUR package does not include it; install the monitor from this fork. Direct wired or Bluetooth devices, and other receiver families, may need additional protocol support. The section [Add a device](#add-a-device) gives the procedure.
 
-Receiver discovery no longer needs a model table for devices paired to Unifying (`c52b`, `c532`) or supported Lightspeed (`c539`, `c545`, `c547`, `c54d`) receivers. It reads each pairing slot, asks the device for its name and battery through HID++ 2.0 (`0x1004`, `0x1000`, `0x1001`), and falls back to HID++ 1.0 battery registers (`0x0d`, `0x07`). A paired device that is asleep, out of range, or does not expose a supported battery query appears as **Unavailable** in the Omarchy panel. Bolt receivers use different pairing registers and are not covered by this discovery path.
+Receiver discovery no longer needs a model table for devices paired to Unifying (`c52b`, `c532`) or supported Lightspeed (`c539`, `c545`, `c547`, `c54d`) receivers. It reads each pairing slot, asks the device for its name and battery through HID++ 2.0 (`0x1004`, `0x1000`, `0x1001`), and falls back to HID++ 1.0 battery registers (`0x0d`, `0x07`). The Omarchy bar and panel show only devices with a current battery reading; sleeping, out-of-range, or unsupported devices stay hidden. Legacy wired and headset state remains a fallback when the scan has no pairing of that kind. Bolt receivers use different pairing registers and are not covered by this discovery path.
 
 In the Omarchy plugin, clicking the bar widget or pressing `r` in its panel forces a fresh HID++ query. It also queries every five minutes. A loading glyph appears beside the bar readings while a query runs. The regular daemon remains event driven. The MX Master 2S can report only charge ranges while charging; a displayed 50% or 90% may be an estimate rather than an exact percentage.
 

@@ -1612,6 +1612,21 @@ class ReceiverDiscoveryTests(unittest.TestCase):
                 raw, _ = proc.communicate()
                 self.assertEqual(proc.returncode, 0)
             self.assertEqual(json.loads(raw)['devices'][0]['name'], 'Presenter')
+            # Old category state must not resurrect a sleeping paired mouse.
+            for device in devices:
+                if device['kind'] == 'mouse':
+                    (Path(mod.STATE_DIR) / device['id']).write_text(
+                        '55\n0\n0\n' + device['name'])
+            (Path(mod.STATE_DIR) / 'mouse').write_text('90\n1\n0\nMX Master 2S')
+            with subprocess.Popen([str(SCRIPT.parent / 'logibar-status'), '--json'],
+                                  env=env, text=True, stdout=subprocess.PIPE) as proc:
+                raw, _ = proc.communicate()
+                self.assertEqual(proc.returncode, 0)
+            sleeping = json.loads(raw)
+            self.assertEqual(len(sleeping['devices']), 6)
+            self.assertFalse(any(d['kind'] == 'mouse' and d['connected']
+                                 for d in sleeping['devices']))
+            self.assertEqual(sleeping['aggregate']['connected_count'], 3)
         self.assertEqual(bus.protocol_errors, [])
 
 
