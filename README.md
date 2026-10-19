@@ -51,7 +51,7 @@ The same core drives both frontends, so a number reads the same on either one:
 
 The MX Master 2S support is specific to this fork. The upstream AUR package does not include it; install the monitor from this fork. Other Logitech devices may need protocol support as well as a new table entry. The section [Add a device](#add-a-device) gives the procedure.
 
-In the Omarchy plugin, clicking the bar widget or pressing `r` in its panel forces a fresh HID++ query. A loading glyph appears beside the bar readings while it runs. The regular daemon remains event driven. The MX Master 2S can report only charge ranges while charging; a displayed 50% or 90% may be an estimate rather than an exact percentage.
+In the Omarchy plugin, clicking the bar widget or pressing `r` in its panel forces a fresh HID++ query. It also queries every five minutes. A loading glyph appears beside the bar readings while a query runs. The regular daemon remains event driven. The MX Master 2S can report only charge ranges while charging; a displayed 50% or 90% may be an estimate rather than an exact percentage.
 
 ## Requirements
 

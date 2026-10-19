@@ -404,6 +404,13 @@ Panel {
     }
   }
 
+  Timer {
+    interval: 300000
+    running: true
+    repeat: true
+    onTriggered: root.requestFullRefresh()
+  }
+
   function refresh() {
     // The host injects `settings` during construction, before bindings are
     // initialized — enabledDevices can be transiently undefined here.
