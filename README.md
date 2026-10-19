@@ -3,7 +3,7 @@
 [![AUR version](https://img.shields.io/aur/version/logibar)](https://aur.archlinux.org/packages/logibar)
 [![License: MIT](https://img.shields.io/github/license/mryll/logibar)](LICENSE)
 
-logibar shows the battery level of your Logitech Lightspeed devices — keyboard, mouse and headset — in your status bar. It runs on Waybar and on the Omarchy shell (Quickshell). It reads each battery over HID++, and it does not need a daemon from the vendor. It refreshes when a device wakes, goes to sleep, or when a charge cycle begins.
+logibar shows the battery level of supported Logitech Lightspeed and Unifying devices — keyboard, mouse and headset — in your status bar. It runs on Waybar and on the Omarchy shell (Quickshell). It reads each battery over HID++, and it does not need a daemon from the vendor. It refreshes when a device wakes, goes to sleep, or when a charge cycle begins.
 
 The same core drives both frontends, so a number reads the same on either one:
 
@@ -40,6 +40,7 @@ The same core drives both frontends, so a number reads the same on either one:
 
 | Device | Type | Daemon |
 |---|---|---|
+| MX Master 2S (Unifying) | Mouse | `logibar-hidpp-monitor` |
 | G915 TKL | Keyboard | `logibar-hidpp-monitor` |
 | G915 X TKL | Keyboard | `logibar-hidpp-monitor` |
 | G Pro Wireless | Mouse | `logibar-hidpp-monitor` |
@@ -48,7 +49,7 @@ The same core drives both frontends, so a number reads the same on either one:
 | G502 X LIGHTSPEED | Mouse | `logibar-hidpp-monitor` |
 | PRO X 2 LIGHTSPEED | Headset | `logibar-headset-monitor` |
 
-Other Logitech Lightspeed devices need only a new entry in a table. The section [Add a device](#add-a-device) gives the procedure.
+The MX Master 2S support is specific to this fork. The upstream AUR package does not include it; install the monitor from this fork. Other Logitech devices may need protocol support as well as a new table entry. The section [Add a device](#add-a-device) gives the procedure.
 
 ## Requirements
 
@@ -81,14 +82,19 @@ sudo udevadm control --reload-rules && sudo udevadm trigger --action=change --su
 
 ### Omarchy
 
-On [Omarchy](https://omarchy.org), the complete installation is two commands:
+For this fork's MX Master 2S support on [Omarchy](https://omarchy.org), install the monitor from source and add the forked plugin:
 
 ```bash
-yay -S logibar
-omarchy plugin add https://github.com/mryll/logibar.git --enable
+git clone https://github.com/patch321/logibar.git
+cd logibar
+make install PREFIX="$HOME/.local"
+make install-systemd PREFIX="$HOME/.local"
+sudo make install-udev
+systemctl --user start logibar-hidpp-monitor.service
+omarchy plugin add https://github.com/patch321/logibar.git --enable
 ```
 
-The first command installs the scripts, the udev rule and the two monitor services. The second command installs the bar widget and enables it. Refer to [Omarchy shell plugin](#omarchy-shell-plugin) for the panel and its settings.
+These commands install the scripts, monitor services, udev rule and bar widget. Refer to [Omarchy shell plugin](#omarchy-shell-plugin) for the panel and its settings. If `mryll.logibar` is already installed, remove that plugin before adding this fork; the plugin ID is the same.
 
 ### Arch Linux (AUR)
 
@@ -96,15 +102,15 @@ The first command installs the scripts, the udev rule and the two monitor servic
 yay -S logibar
 ```
 
-The package adds the udev rule and enables both services.
+The package adds the udev rule and enables both services. This upstream AUR package does not include the MX Master 2S changes in this fork.
 
 ### From source
 
 ```bash
-git clone https://github.com/mryll/logibar.git
+git clone https://github.com/patch321/logibar.git
 cd logibar
-make install PREFIX=~/.local
-make install-systemd
+make install PREFIX="$HOME/.local"
+make install-systemd PREFIX="$HOME/.local"
 sudo make install-udev
 ```
 
@@ -200,14 +206,14 @@ Install the plugin, then add it to your bar:
 From the marketplace, or from this repository directly:
 
 ```bash
-omarchy plugin add https://github.com/mryll/logibar.git --enable
+omarchy plugin add https://github.com/patch321/logibar.git --enable
 ```
 
 That clones the repository into `~/.config/omarchy/plugins/mryll.logibar` and
 validates the manifest before it is enabled. To remove it later:
 `omarchy plugin remove mryll.logibar`.
 
-The plugin runs `logibar-status` from your PATH and needs the battery daemons, so install those too — from the AUR (`yay -S logibar`) or with `make install-all PREFIX=~/.local`.
+The plugin runs `logibar-status` from your PATH and needs the battery daemons. To show the MX Master 2S, install the daemon from this fork as described above.
 
 For development, link the working copy instead of cloning a second one:
 
@@ -420,7 +426,7 @@ An error is also a JSON document, with an `error` field and the same exit code 0
 
 `logibar-hidpp-monitor` uses the standard **Logitech HID++ 2.0** protocol. [Solaar](https://github.com/pwr-Solaar/Solaar) uses the same protocol, but logibar sends the commands directly to hidapi, with no extra daemon.
 
-Each device has two product IDs: one for the Lightspeed receiver and one for the USB cable. One thread monitors each product ID, and a shared state selects the live connection. The cable has priority. A cable-only line has the wireless PID `None` (for example, the G502 X LIGHTSPEED). This line does not share its state with the receiver line. If the cable and the receiver are both connected, the widget shows the lower battery level. It also shows the charging status of that reading, which can be old.
+Lightspeed devices generally have two product IDs: one for the receiver and one for the USB cable. One thread monitors each product ID, and a shared state selects the live connection. The cable has priority. A cable-only line has the wireless PID `None` (for example, the G502 X LIGHTSPEED). This line does not share its state with the receiver line. If the cable and the receiver are both connected, the widget shows the lower battery level. It also shows the charging status of that reading, which can be old. For the MX Master 2S, Linux exposes a HID++ node with the device's Unifying WPID `4069`; the monitor finds its pairing slot and has no separate wired node.
 
 To read most batteries, the daemon asks the ROOT feature at index `0x00` for the index of the UNIFIED_BATTERY feature (`0x1004`). Then it asks that feature for the charge:
 
@@ -459,6 +465,8 @@ The error report does not include the sub-register. Thus, an error can also be t
 The name from the pairing information applies only to a reading from the receiver. A reading from the cable uses the name of the cable PID.
 
 The G915 TKL and G Pro Wireless instead expose BATTERY_VOLTAGE (`0x1001`). Its query is function 0 (request byte `0x0d`), and the response contains a two-byte millivolt reading and charging flags. Logibar converts that voltage to a percentage using the same discharge curve as Solaar. A drained cell converts to `0%`, which the widgets show as a critical reading — only `connected` decides visibility.
+
+The MX Master 2S exposes BATTERY_STATUS (`0x1000`), also queried with function 0. The monitor checks Unifying pairing slots 1–6 for WPID `4069` and sends subsequent battery queries to that slot. The device may report a level of `0` while charging or full. In that case logibar uses the same status-based approximations as Solaar: charging or almost full → 50%, full → 90%, slow charging → 20%. These are coarse estimates, not measured percentages. The charging indicator follows the reported status.
 
 Receiver `c539` is the LIGHTSPEED receiver of several other mice (G403, G703, G903, G502 LIGHTSPEED). The daemon reads the wireless PID of the paired mouse only to show its name. It does not use the PID to select the battery feature: the G Pro Wireless is the model verified on hardware. A mouse without BATTERY_VOLTAGE answers the feature lookup with index 0, so the daemon publishes no reading.
 
@@ -500,6 +508,7 @@ To add another Logitech device to the keyboard and mouse daemon:
 
    ```python
    DEVICES = [
+       (0x4069, None, "mouse", 10, "MX Master 2S"),
        (0xc539, 0xc088, "mouse", 10, "G Pro Wireless"),
        (0xc545, 0xc343, "keyboard", 9, "G915 TKL"),
        (0xc547, 0xc357, "keyboard", 9, "G915 X TKL"),
@@ -509,7 +518,7 @@ To add another Logitech device to the keyboard and mouse daemon:
    ]
    ```
 
-   Devices use UNIFIED_BATTERY (`0x1004`) by default. If the device instead exposes BATTERY_VOLTAGE (`0x1001`), add its receiver PID to `BATTERY_FEATURE_BY_RECEIVER`.
+   Devices use UNIFIED_BATTERY (`0x1004`) by default. If the device instead exposes BATTERY_VOLTAGE (`0x1001`) or BATTERY_STATUS (`0x1000`), add its PID to `BATTERY_FEATURE_BY_RECEIVER`. A Unifying device with a device-specific hidraw node also needs a `UNIFYING_WPID_BY_PID` entry so the monitor discovers its pairing slot.
 
    The receiver USB PID can already be in the table for a device of the same type. For example, `c547` is in the table for the PRO X Superlight. In that case, do not add a second line for the receiver. Add the wireless PID (WPID) of the device to `MODEL_BY_WPID`, with its device type and model name. The WPID is not the USB PID of the receiver. The kernel log shows the WPID, for example `logitech-hidpp-device 0003:046D:409F`. The daemon reads the WPID from the pairing register of the receiver (`0xb5`). It shows the model name only on a line of the same device type. For the cable, add a line with `None` as the wireless PID, as for the G502 X LIGHTSPEED.
 

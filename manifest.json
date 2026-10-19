@@ -5,7 +5,7 @@
   "version": "0.6.1",
   "author": "mryll",
   "license": "MIT",
-  "description": "Combined battery status for Logitech Lightspeed devices (keyboard, mouse, headset) in the Omarchy bar.",
+  "description": "Combined battery status for supported Logitech Lightspeed and Unifying devices in the Omarchy bar.",
   "kinds": [
     "bar-widget"
   ],
@@ -49,7 +49,7 @@
         "key": "showMouse",
         "type": "boolean",
         "label": "Show mouse",
-        "description": "Battery of the connected Logitech mouse (G Pro Wireless, PRO X Superlight, PRO X Superlight 2, G502 X LIGHTSPEED). The panel names the model.",
+        "description": "Battery of the connected Logitech mouse (MX Master 2S, G Pro Wireless, PRO X Superlight, PRO X Superlight 2, G502 X LIGHTSPEED). The panel names the model.",
         "defaultValue": true
       },
       {

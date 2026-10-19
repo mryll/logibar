@@ -26,6 +26,7 @@ else:
 
 sys.path.insert(0, str(Path(__file__).parent))
 from fake_hid import (  # noqa: E402
+    BATTERY_STATUS_FEATURE,
     BATTERY_VOLTAGE_FEATURE,
     DaemonHarness,
     FakeHidBus,
@@ -715,6 +716,43 @@ class BatteryVoltageTests(unittest.TestCase):
         self.assertEqual(battery_requests[0][0:4], [0x11, 0x01, 0x07, 0x0d])
 
 
+class BatteryStatusTests(unittest.TestCase):
+    def test_mx_master_2s_captured_charging_report_has_approximate_level(self):
+        # Captured from the MX Master 2S in Unifying slot 4. The mouse sends
+        # level 0 while charging; Solaar's status approximation is 50%.
+        report = bytes.fromhex("11 04 07 0b 00 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00")
+        self.assertEqual(
+            monitor.decode_battery_report(monitor.BATTERY_STATUS_FEATURE, report),
+            (50, True),
+        )
+
+    def test_battery_status_reports_direct_percentage_when_available(self):
+        report = [0x11, 0x04, 0x07, 0x0b, 70, 0, 0]
+        self.assertEqual(
+            monitor.decode_battery_report(monitor.BATTERY_STATUS_FEATURE, report),
+            (70, False),
+        )
+        # On this device a zero level with FULL status is an approximation.
+        report[4], report[6] = 0, 3
+        self.assertEqual(
+            monitor.decode_battery_report(monitor.BATTERY_STATUS_FEATURE, report),
+            (90, True),
+        )
+
+    def test_status_query_uses_function_zero_in_the_paired_slot(self):
+        bus, fd = single_device_bus(
+            0x4069,
+            FakePairedDevice(kind=0x03, battery_feature=BATTERY_STATUS_FEATURE,
+                             battery=0, charging=True, wpid=0x4069,
+                             pairing_slot=4),
+        )
+        self.assertEqual(monitor.find_paired_index(fd, 0x4069), 4)
+        self.assertEqual(monitor.query_battery(fd, 4, 7, BATTERY_STATUS_FEATURE),
+                         (50, True))
+        writes = [list(entry[4]) for entry in bus.log if entry[0] == "write"]
+        self.assertIn([0x11, 4, 7, 0x0d], [c[:4] for c in writes])
+
+
 class FakeBusTests(unittest.TestCase):
     def test_enumerate_filters_by_ids_and_returns_the_hidapi_fields(self):
         bus = FakeHidBus([
@@ -874,6 +912,25 @@ class ForeignResponseTests(unittest.TestCase):
 
 
 class BusIntegrationTests(unittest.TestCase):
+    def test_mx_master_2s_on_unifying_slot_four_updates_mouse_panel(self):
+        bus = FakeHidBus([
+            FakeNode(b"/dev/mx2s", 0x4069,
+                     FakePairedDevice(kind=0x03,
+                                      battery_feature=BATTERY_STATUS_FEATURE,
+                                      battery=0, charging=True, wpid=0x4069,
+                                      pairing_slot=4), device_idx=4),
+        ])
+        with DaemonHarness(bus) as harness:
+            threads = harness.module.monitor_device(0x4069, None, "mouse", 10)
+            self.assertEqual(len(threads), 1)
+            harness.threads.extend(threads)
+            harness.wait_for_state("mouse", "50\n1\n1\nMX Master 2S")
+            bus.emit_battery_event(b"/dev/mx2s", battery=70, charging=False)
+            harness.wait_for_state("mouse", "70\n1\n0\nMX Master 2S")
+            report = harness.stop()
+            self.assertEqual(report["alive"], [])
+            self.assertEqual(report["protocol_errors"], [])
+
     def test_g_pro_wireless_voltage_updates_and_sleep_wake(self):
         bus = FakeHidBus([
             FakeNode(b"/dev/gpro", 0xC539, FakePairedDevice(
@@ -1352,6 +1409,9 @@ class SleepingReceiverTests(unittest.TestCase):
 
 class DeviceCoverageTests(unittest.TestCase):
     EMULATED_SHEETS = {
+        (0x4069, None): ("mouse", 10, FakePairedDevice(
+            kind=0x03, battery_feature=BATTERY_STATUS_FEATURE,
+            battery=0, charging=True, wpid=0x4069, pairing_slot=4)),
         (0xC539, 0xC088): ("mouse", 10, FakePairedDevice(
             kind=0x03, battery_feature=BATTERY_VOLTAGE_FEATURE,
             voltage=3728, battery_index=0x06)),
@@ -1400,7 +1460,11 @@ class DeviceCoverageTests(unittest.TestCase):
             self.assertIn((name, model), paired)
 
     def test_g915_tkl_and_g_pro_wireless_report_voltage(self):
-        self.assertEqual(set(monitor.BATTERY_FEATURE_BY_RECEIVER), {0xC545, 0xC539})
+        self.assertEqual(set(monitor.BATTERY_FEATURE_BY_RECEIVER), {0x4069, 0xC545, 0xC539})
+        self.assertEqual(
+            self.EMULATED_SHEETS[(0x4069, None)][2].battery_feature,
+            BATTERY_STATUS_FEATURE,
+        )
         self.assertEqual(
             self.EMULATED_SHEETS[(0xC545, 0xC343)][2].battery_feature,
             0x1001,

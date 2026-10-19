@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HID++ Battery Monitor for Logitech Lightspeed devices
+HID++ Battery Monitor for Logitech Lightspeed and Unifying devices
 - Event-driven: blocking read with timeout, no polling
 """
 import hid
@@ -24,6 +24,7 @@ PAIRING_INFO_DEVICE_1 = 0x20  # sub-register of device index 1; +1 per slot
 FLAG_WIRELESS = 0x000100
 FLAG_SOFTWARE_PRESENT = 0x000800
 DEVICE_NAME_FEATURE = 0x0005
+BATTERY_STATUS_FEATURE = 0x1000
 BATTERY_VOLTAGE_FEATURE = 0x1001
 UNIFIED_BATTERY_FEATURE = 0x1004
 DEVICE_KIND = {"keyboard": 0x00, "mouse": 0x03}
@@ -49,7 +50,9 @@ PROBE_RETRY_SECONDS = 5.0
 # foreign input and fall back to a generic name when it does not fit.
 # A wireless_pid of None is a cable-only line: its receiver is already
 # monitored by another line, which names the device through MODEL_BY_WPID.
+# A wired_pid of None is a wireless-only Unifying device.
 DEVICES = [
+    (0x4069, None, "mouse", 10, "MX Master 2S"),
     (0xc539, 0xc088, "mouse", 10, "G Pro Wireless"),
     (0xc545, 0xc343, "keyboard", 9, "G915 TKL"),
     (0xc547, 0xc357, "keyboard", 9, "G915 X TKL"),
@@ -67,12 +70,19 @@ MODEL_BY_PIDS = {(wireless, wired): model for wireless, wired, _, _, model in DE
 # printable ASCII, 48 at most.
 # wireless_pid -> (device type, model)
 MODEL_BY_WPID = {
+    0x4069: ("mouse", "MX Master 2S"),
     0x409f: ("mouse", "G502 X LIGHTSPEED"),
 }
 BATTERY_FEATURE_BY_RECEIVER = {
+    0x4069: BATTERY_STATUS_FEATURE,
     0xc539: BATTERY_VOLTAGE_FEATURE,
     0xc545: BATTERY_VOLTAGE_FEATURE,
 }
+# On Linux, hid-logitech-dj exposes a paired Unifying device under its WPID
+# (0x4069 for MX Master 2S). Its HID++ messages still use the pairing slot as
+# the device index. Discover that slot rather than assuming slot 1.
+UNIFYING_WPID_BY_PID = {0x4069: 0x4069}
+UNIFYING_MAX_SLOTS = 6
 BATTERY_VOLTAGE_LEVELS = (
     (4186, 100),
     (4067, 90),
@@ -262,6 +272,13 @@ def read_paired_wpid(dev, device_idx):
             saw_error = saw_error or is_pairing_error(r)
     except Exception:
         pass
+    return None
+
+def find_paired_index(dev, wpid):
+    """Find a Unifying device's current slot on its HID++ hidraw node."""
+    for device_idx in range(1, UNIFYING_MAX_SLOTS + 1):
+        if read_paired_wpid(dev, device_idx) == wpid:
+            return device_idx
     return None
 
 def paired_model(name, wpid):
@@ -464,6 +481,15 @@ def voltage_to_percentage(voltage):
 def decode_battery_report(battery_feature, report):
     if len(report) <= 6:
         return None, None
+    if battery_feature == BATTERY_STATUS_FEATURE:
+        percentage, status = report[4], report[6]
+        if status in (5, 6) or percentage > 100:
+            return None, None
+        if percentage == 0:
+            # MX Master 2S reports no percentage while charging. Match
+            # Solaar's approximation for these status values.
+            percentage = {1: 50, 2: 50, 3: 90, 4: 20}.get(status)
+        return percentage, status in (1, 2, 3, 4)
     if battery_feature == UNIFIED_BATTERY_FEATURE:
         percentage = report[4]
         if 0 < percentage <= 100:
@@ -475,7 +501,7 @@ def decode_battery_report(battery_feature, report):
     return None, None
 
 def query_battery(dev, device_idx, feat_idx, battery_feature):
-    function = 0x00 if battery_feature == BATTERY_VOLTAGE_FEATURE else 0x10
+    function = 0x10 if battery_feature == UNIFIED_BATTERY_FEATURE else 0x00
     request = function | SWID_MONITOR
     try:
         flush_buffer(dev)
@@ -678,6 +704,13 @@ def monitor_wireless(wireless_pid, name, waybar_signal, battery_feature, state, 
 
                 time.sleep(0.1)
                 enable_notifications(dev)
+                if wireless_pid in UNIFYING_WPID_BY_PID:
+                    device_idx = find_paired_index(dev, UNIFYING_WPID_BY_PID[wireless_pid])
+                    if device_idx is None:
+                        dev = disconnect_wireless(dev, name, waybar_signal, state, state_lock)
+                        opened = None
+                        time.sleep(0.5)
+                        continue
                 refresh_paired_model(dev, device_idx, name, state, state_lock)
 
                 # Try to query battery with retries
@@ -805,17 +838,24 @@ def monitor_device(wireless_pid, wired_pid, name, waybar_signal, model=None):
     }
     state_lock = threading.Lock()
 
-    t_wireless = threading.Thread(target=monitor_wireless, args=(wireless_pid, name, waybar_signal, battery_feature, state, state_lock), daemon=True)
-    t_wired = threading.Thread(target=monitor_wired, args=(wired_pid, name, waybar_signal, battery_feature, state, state_lock), daemon=True)
-
-    if wireless_pid is None:
+    threads = []
+    if wireless_pid is not None:
+        t_wireless = threading.Thread(
+            target=monitor_wireless,
+            args=(wireless_pid, name, waybar_signal, battery_feature, state, state_lock),
+            daemon=True,
+        )
+        t_wireless.start()
+        threads.append(t_wireless)
+    if wired_pid is not None:
+        t_wired = threading.Thread(
+            target=monitor_wired,
+            args=(wired_pid, name, waybar_signal, battery_feature, state, state_lock),
+            daemon=True,
+        )
         t_wired.start()
-        return [t_wired]
-
-    t_wireless.start()
-    t_wired.start()
-
-    return [t_wireless, t_wired]
+        threads.append(t_wired)
+    return threads
 
 def main():
     global running

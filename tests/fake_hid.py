@@ -32,10 +32,12 @@ from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
 DEVICE_NAME_FEATURE = 0x0005
+BATTERY_STATUS_FEATURE = 0x1000
 BATTERY_VOLTAGE_FEATURE = 0x1001
 UNIFIED_BATTERY_FEATURE = 0x1004
 
 _DEFAULT_BATTERY_INDEX = {
+    BATTERY_STATUS_FEATURE: 0x07,
     UNIFIED_BATTERY_FEATURE: 0x06,
     BATTERY_VOLTAGE_FEATURE: 0x07,
 }
@@ -47,15 +49,16 @@ class FakePairedDevice:
 
     def __init__(self, kind, battery_feature=UNIFIED_BATTERY_FEATURE,
                  battery=None, voltage=None, charging=False, awake=True,
-                 name_index=0x03, battery_index=None, wpid=None):
+                 name_index=0x03, battery_index=None, wpid=None,
+                 pairing_slot=1):
         if battery_feature not in _DEFAULT_BATTERY_INDEX:
             raise ValueError(f"unsupported battery feature 0x{battery_feature:04x}")
         if battery_index is None:
             battery_index = _DEFAULT_BATTERY_INDEX[battery_feature]
         if not name_index or not battery_index:
             raise ValueError("feature indices must be non-zero")
-        if battery_feature == UNIFIED_BATTERY_FEATURE and battery is None:
-            raise ValueError("a unified-battery sheet needs a battery percentage")
+        if battery_feature in (BATTERY_STATUS_FEATURE, UNIFIED_BATTERY_FEATURE) and battery is None:
+            raise ValueError("a battery-status sheet needs a battery percentage")
         if battery_feature == BATTERY_VOLTAGE_FEATURE and voltage is None:
             raise ValueError("a battery-voltage sheet needs a voltage")
         self.kind = kind
@@ -67,6 +70,7 @@ class FakePairedDevice:
         self.name_index = name_index
         self.battery_index = battery_index
         self.wpid = wpid
+        self.pairing_slot = pairing_slot
 
     def feature_index(self, feature_id):
         known = {DEVICE_NAME_FEATURE: self.name_index,
@@ -93,11 +97,12 @@ class FakePairedDevice:
         return None, f"unknown command {bytes(cmd[:8]).hex()}"
 
     def _pairing_info_report(self, cmd):
-        """HID++ 1.0 long-register read. Only pairing info (0xb5, slot 1) is
+        """HID++ 1.0 long-register read. Only the configured pairing slot is
         declared; a sheet without a wpid answers like an empty slot."""
-        if cmd[3] != 0xb5 or cmd[4] != 0x20 or self.wpid is None:
+        sub = 0x20 + self.pairing_slot - 1
+        if cmd[3] != 0xb5 or cmd[4] != sub or self.wpid is None:
             return bytes([0x10, 0xff, 0x8f, 0x83, cmd[3], 0x02, 0x00])
-        return bytes([0x11, 0xff, 0x83, 0xb5, 0x20, 0x07, 0x08,
+        return bytes([0x11, 0xff, 0x83, 0xb5, sub, 0x07, 0x08,
                       self.wpid >> 8, self.wpid & 0xff, 0x11, 0x00, 0x02]
                      + [0x00] * 8)
 
@@ -108,6 +113,12 @@ class FakePairedDevice:
 
     def _battery_report(self, cmd):
         function = cmd[3] >> 4
+        if self.battery_feature == BATTERY_STATUS_FEATURE:
+            if function != 0x0:  # getStatus
+                return None, f"unsupported BATTERY_STATUS function byte 0x{cmd[3]:02x}"
+            status = 0x01 if self.charging else 0x00
+            return bytes([0x11, cmd[1], cmd[2], cmd[3],
+                          self.battery, 0x00, status]), None
         if self.battery_feature == UNIFIED_BATTERY_FEATURE:
             if function != 0x1:  # getStatus
                 return None, f"unsupported UNIFIED_BATTERY function byte 0x{cmd[3]:02x}"
@@ -120,7 +131,7 @@ class FakePairedDevice:
                       self.voltage >> 8, self.voltage & 0xff, flags]), None
 
     def battery_event(self, device_idx):
-        if self.battery_feature == UNIFIED_BATTERY_FEATURE:
+        if self.battery_feature in (BATTERY_STATUS_FEATURE, UNIFIED_BATTERY_FEATURE):
             status = 0x01 if self.charging else 0x00
             return bytes([0x11, device_idx, self.battery_index, 0x00,
                           self.battery, 0x00, status])
