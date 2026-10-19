@@ -284,8 +284,13 @@ Panel {
 
   readonly property string faceLabel: {
     if (vertical || !hasData || !aggregate || connectedCount === 0) return ""
-    if (aggregate.worst_battery === null) return ""
-    return aggregate.worst_battery + "%"
+    var parts = []
+    for (var i = 0; i < deviceRows.length; i++) {
+      var d = deviceRows[i]
+      parts.push((identityGlyphs[d.id] || batteryGlyph(d.battery, d.charging === true))
+        + " " + d.battery + "%" + (d.charging === true ? " 󰂅" : ""))
+    }
+    return parts.join("  ") + (fullRefreshing ? " 󰑐" : "")
   }
 
   // Glyph and number share this one color, so the bar element reads as a
@@ -306,9 +311,11 @@ Panel {
     var lines = []
     for (var i = 0; i < deviceRows.length; i++) {
       var d = deviceRows[i]
-      lines.push((identityGlyphs[d.id] || "") + " " + d.battery + "%"
+      lines.push(d.name + ": " + d.battery + "%"
         + (d.charging === true ? " · Charging" : ""))
     }
+    if (fullRefreshing) lines.push("Refreshing device readings…")
+    else if (refreshError !== "") lines.push(refreshError)
     return lines.join("\n")
   }
 
@@ -350,6 +357,8 @@ Panel {
 
   // The copy button shows a check for a moment.
   property bool installCopied: false
+  property bool fullRefreshing: false
+  property string refreshError: ""
   Timer {
     id: copiedReset
     interval: 1500
@@ -368,7 +377,31 @@ Panel {
     function show(): void { root.open() }
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
-    function refresh(): void { root.refresh() }
+    function refresh(): void { root.requestFullRefresh() }
+  }
+
+  function requestFullRefresh() {
+    if (fullRefreshing) return
+    var enabled = enabledDevices
+    if (!enabled) return
+    var devs = []
+    for (var i = 0; i < enabled.length; i++)
+      if (enabled[i] === "keyboard" || enabled[i] === "mouse") devs.push(enabled[i])
+    if (devs.length === 0) { refresh(); return }
+    refreshError = ""
+    fullRefreshing = true
+    forceProc.command = ["/bin/sh", "-c", 'exec "$0" "$@"',
+      "logibar-hidpp-monitor", "--refresh", "--devices", devs.join(",")]
+    forceProc.running = true
+  }
+
+  Process {
+    id: forceProc
+    onExited: function(code) {
+      root.fullRefreshing = false
+      if (code !== 0) root.refreshError = "Device refresh failed; showing last reading"
+      root.refresh()
+    }
   }
 
   function refresh() {
@@ -611,10 +644,10 @@ Panel {
           panelFlick.contentY = root.clamp(panelFlick.contentY + dy * Style.space(56), 0,
                                            Math.max(0, panelFlick.contentHeight - panelFlick.height))
       }
-      onActivateRequested: root.refresh()
+      onActivateRequested: root.requestFullRefresh()
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
-      onTextKey: function(t) { if (t === "r" || t === "R") root.refresh() }
+      onTextKey: function(t) { if (t === "r" || t === "R") root.requestFullRefresh() }
 
       Flickable {
         id: panelFlick

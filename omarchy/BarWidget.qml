@@ -8,9 +8,8 @@ import qs.Ui
 // --json), the state-file watchers, and the detail panel live in Panel.qml
 // (loaded once, shared identity for the bar's popout coordinator).
 //
-// Bar face: stepped battery glyph of the worst connected device (charging
-// variant when anything charges) + its percent, tinted by a continuous
-// level gradient between theme tokens. Collapses when nothing is connected.
+// Bar face: icon and percentage for each connected device, with a charge
+// glyph when needed. The panel controls the shared color and tooltip.
 BarWidget {
   id: root
   moduleName: "mryll.logibar"
@@ -18,8 +17,7 @@ BarWidget {
   readonly property var panelItem: panelLoader.item
   readonly property string faceGlyph: panelItem ? panelItem.faceGlyph : ""
   readonly property string faceLabel: panelItem ? panelItem.faceLabel : ""
-  readonly property string faceText: faceGlyph === "" ? ""
-    : (faceLabel !== "" ? faceGlyph + " " + faceLabel : faceGlyph)
+  readonly property string faceText: faceLabel !== "" ? faceLabel : faceGlyph
 
   function injectPanel() {
     var target = panelLoader.item
@@ -31,7 +29,7 @@ BarWidget {
   }
 
   function refresh() {
-    if (panelItem && panelItem.refresh) panelItem.refresh()
+    if (panelItem && panelItem.requestFullRefresh) panelItem.requestFullRefresh()
   }
 
   function togglePanel() {
@@ -103,7 +101,10 @@ BarWidget {
 
     onPressed: function(b) {
       if (b === Qt.MiddleButton) root.refresh()
-      else if (b !== Qt.RightButton) root.togglePanel()
+      else if (b !== Qt.RightButton) {
+        root.togglePanel()
+        root.refresh()
+      }
     }
   }
 }

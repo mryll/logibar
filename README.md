@@ -28,7 +28,7 @@ The same core drives both frontends, so a number reads the same on either one:
 
 ## Features
 
-- **One widget for all devices.** The bar shows the battery of the device that needs attention first. One click or one hover shows the details of each device.
+- **One widget for all devices.** The Omarchy bar shows each connected device's percentage; one click opens the panel and queries the keyboard and mouse directly. The Waybar face shows the device that needs attention first.
 - **Event-driven.** Two small daemons listen for HID++ events. There is no polling loop. The bar refreshes when the hardware sends an event.
 - **A real gauge.** The meters go from red at empty, through amber, to green at full. The colors come from your theme.
 - **Two frontends, one brain.** `logibar-status` makes every decision. Waybar and the Omarchy plugin only draw the result.
@@ -50,6 +50,8 @@ The same core drives both frontends, so a number reads the same on either one:
 | PRO X 2 LIGHTSPEED | Headset | `logibar-headset-monitor` |
 
 The MX Master 2S support is specific to this fork. The upstream AUR package does not include it; install the monitor from this fork. Other Logitech devices may need protocol support as well as a new table entry. The section [Add a device](#add-a-device) gives the procedure.
+
+In the Omarchy plugin, clicking the bar widget or pressing `r` in its panel forces a fresh HID++ query. A loading glyph appears beside the bar readings while it runs. The regular daemon remains event driven. The MX Master 2S can report only charge ranges while charging; a displayed 50% or 90% may be an estimate rather than an exact percentage.
 
 ## Requirements
 

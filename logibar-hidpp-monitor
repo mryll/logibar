@@ -11,6 +11,7 @@ import os
 import subprocess
 import threading
 import tempfile
+import argparse
 
 VID = 0x046d
 # Use XDG_RUNTIME_DIR for secure, atomic state files
@@ -38,6 +39,7 @@ DEVICE_KIND = {"keyboard": 0x00, "mouse": 0x03}
 # Events carry software id 0, which is why requests must never use 0.
 SWID_MONITOR = 0x0d
 SWID_PROBE = 0x0e
+SWID_REFRESH = 0x0b
 EVENT_SWID = 0x00
 
 PROBE_RETRY_SECONDS = 5.0
@@ -500,9 +502,9 @@ def decode_battery_report(battery_feature, report):
             return voltage_to_percentage(voltage), bool(report[6] & 0x80)
     return None, None
 
-def query_battery(dev, device_idx, feat_idx, battery_feature):
+def query_battery(dev, device_idx, feat_idx, battery_feature, swid=SWID_MONITOR):
     function = 0x10 if battery_feature == UNIFIED_BATTERY_FEATURE else 0x00
-    request = function | SWID_MONITOR
+    request = function | swid
     try:
         flush_buffer(dev)
         cmd = [0x11, device_idx, feat_idx, request] + [0] * 16
@@ -857,8 +859,70 @@ def monitor_device(wireless_pid, wired_pid, name, waybar_signal, model=None):
         threads.append(t_wired)
     return threads
 
+def refresh_source(pid, name, battery_feature, wired=False):
+    """Read one receiver or cable directly, independently of daemon cache."""
+    nodes = safe_enumerate(VID, pid)
+    if not nodes:
+        return None
+    path = nodes[0]['path'] if wired else receiver_path_for_device(pid, name, nodes)
+    if path is None:
+        return None
+    dev = hid.device()
+    try:
+        dev.open_path(path)
+        device_idx = 0xff if wired else 0x01
+        if not wired and pid in UNIFYING_WPID_BY_PID:
+            device_idx = find_paired_index(dev, UNIFYING_WPID_BY_PID[pid])
+            if device_idx is None:
+                return None
+        feat_idx = get_feature_index(dev, device_idx, battery_feature, swid=SWID_REFRESH)
+        if not feat_idx:
+            return None
+        battery, charging = query_battery(dev, device_idx, feat_idx, battery_feature,
+                                          swid=SWID_REFRESH)
+        if battery is None:
+            return None
+        return battery, charging
+    finally:
+        close_quietly(dev)
+
+def refresh_once(names):
+    """Force a hardware query and publish fresh values for available devices."""
+    results = {}
+    for wireless_pid, wired_pid, name, waybar_signal, model in DEVICES:
+        if name not in names:
+            continue
+        feature = BATTERY_FEATURE_BY_RECEIVER.get(wireless_pid, UNIFIED_BATTERY_FEATURE)
+        reading = None
+        try:
+            if wired_pid is not None:
+                reading = refresh_source(wired_pid, name, feature, wired=True)
+            if reading is None and wireless_pid is not None:
+                reading = refresh_source(wireless_pid, name, feature)
+        except Exception as error:
+            print(f"logibar-hidpp-monitor: refresh of {model} failed: {error}", file=sys.stderr)
+        if reading is not None:
+            current = results.get(name)
+            if current is None or reading[0] < current[0]:
+                results[name] = (*reading, model, waybar_signal)
+    for name, (battery, charging, model, waybar_signal) in results.items():
+        state = {'_source_id': ('refresh', name), '_model': model,
+                 'wired_connected': False}
+        write_state(name, battery, True, charging, waybar_signal, state)
+    return 0 if results else 1
+
 def main():
     global running
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--refresh', action='store_true', help='query hardware once and exit')
+    parser.add_argument('--devices', default='keyboard,mouse', help='comma-separated devices to refresh')
+    args = parser.parse_args()
+    if args.refresh:
+        names = set(args.devices.split(',')) & {'keyboard', 'mouse'}
+        if not names:
+            parser.error('--refresh requires keyboard and/or mouse')
+        return refresh_once(names)
 
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
@@ -870,6 +934,7 @@ def main():
 
     while running:
         time.sleep(1)
+    return 0
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

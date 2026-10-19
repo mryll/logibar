@@ -1517,5 +1517,36 @@ class HeadsetStateFileTests(unittest.TestCase):
             self.assertRegex(mod.MODEL, r"^[A-Za-z0-9 ._()+/-]{1,48}$")
 
 
+class ForcedRefreshTests(unittest.TestCase):
+    def test_queries_both_receivers_and_rewrites_fresh_state(self):
+        keyboard = FakePairedDevice(kind=0x00, battery_feature=BATTERY_VOLTAGE_FEATURE,
+                                    voltage=3989)
+        mouse = FakePairedDevice(kind=0x03, battery_feature=BATTERY_STATUS_FEATURE,
+                                 battery=55, charging=True, wpid=0x4069,
+                                 pairing_slot=4)
+        bus = FakeHidBus([
+            FakeNode(b"/dev/keyboard", 0xC545, keyboard),
+            FakeNode(b"/dev/mouse", 0x4069, mouse),
+        ])
+        mod = load_monitor_module(bus)
+        mod.DEVICES = [mod.DEVICES[0], mod.DEVICES[2]]
+        mod.subprocess.run = lambda *a, **k: None
+        with tempfile.TemporaryDirectory() as tmp:
+            mod.STATE_DIR = tmp
+            self.assertEqual(mod.refresh_once({"keyboard", "mouse"}), 0)
+            self.assertEqual((Path(tmp) / "keyboard").read_text(),
+                             "80\n1\n0\nG915 TKL")
+            self.assertEqual((Path(tmp) / "mouse").read_text(),
+                             "55\n1\n1\nMX Master 2S")
+            mouse.battery = 60
+            self.assertEqual(mod.refresh_once({"mouse"}), 0)
+            self.assertEqual((Path(tmp) / "mouse").read_text(),
+                             "60\n1\n1\nMX Master 2S")
+        requests = [entry[4] for entry in bus.log if entry[0] == "write"]
+        self.assertTrue(any(cmd[0] == 0x11 and cmd[3] == mod.SWID_REFRESH
+                            for cmd in requests))
+        self.assertEqual(bus.protocol_errors, [])
+
+
 if __name__ == "__main__":
     unittest.main()
