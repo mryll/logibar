@@ -267,7 +267,7 @@ $JSON_MODE && $WATCH && cli_error "--watch only makes sense in waybar mode"
 
 # --- Read state files into parallel arrays ---
 # Sets: BATTERY[id] CONNECTED[id] CHARGING[id] STATE[id] UPDATED[id] NAME[id]
-declare -A BATTERY CONNECTED CHARGING STATE UPDATED NAME DEVICE_KIND LAST_KNOWN LAST_SEEN
+declare -A BATTERY CONNECTED CHARGING STATE UPDATED NAME DEVICE_KIND LAST_KNOWN LAST_SEEN SOURCE
 LAST_KNOWN_SECONDS=$((24 * 60 * 60))
 DYNAMIC_REGISTRY=false
 kind_requested() {
@@ -306,11 +306,12 @@ read_one_device() {
     local id="$1" file battery connected charging model seen blob now epoch
     file="$STATE_DIR/$id"
     BATTERY[$id]=""; CONNECTED[$id]=0; CHARGING[$id]=0; STATE[$id]="disconnected"; UPDATED[$id]=""
-    LAST_KNOWN[$id]=""; LAST_SEEN[$id]=""
+    LAST_KNOWN[$id]=""; LAST_SEEN[$id]=""; SOURCE[$id]=""
     NAME[$id]="${DEVICE_NAME[$id]}"
     blob=$(read_bounded "$file" "$MAX_STATE_BYTES") || return
     battery=""; connected=""; charging=""; model=""; seen=""
     { IFS= read -r battery; IFS= read -r connected; IFS= read -r charging; IFS= read -r model; IFS= read -r seen; } <<< "$blob"
+    [[ "$id" != rx-* && "$seen" == "wired" ]] && SOURCE[$id]="wired"
     model=${model:0:64}
     is_plain_model "$model" && NAME[$id]="$model"
     UPDATED[$id]=$(date -Iseconds -d "@$(stat -c %Y "$file" 2>/dev/null || echo 0)" 2>/dev/null)
@@ -357,6 +358,9 @@ read_devices() {
         done
         $found && continue
         read_one_device "$kind"
+        if [[ "$kind" != headset && "${SOURCE[$kind]}" != "wired" ]]; then
+            continue
+        fi
         [[ "${CONNECTED[$kind]}" == "1" ]] && DEVICES+=("$kind")
     done
 }

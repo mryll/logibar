@@ -151,13 +151,19 @@ def write_state(name, battery, connected, charging, waybar_signal, state):
             # cable PID names its own model.
             paired = '' if state.get('wired_connected') else state.get('_paired_model')
             model = paired or state.get('_model', '')
-            sources[state['_source_id']] = (battery, connected, charging, model)
+            sources[state['_source_id']] = (battery, connected, charging, model,
+                                            bool(state.get('wired_connected')))
             connected_sources = [source for source in sources.values() if source[1]]
-            selected = min(connected_sources, key=lambda source: source[0]) if connected_sources else (0, False, False, '')
-            # Four lines: battery, connected, charging, model. The model is the
+            selected = min(connected_sources, key=lambda source: source[0]) if connected_sources else (0, False, False, '', False)
+            # Four lines: battery, connected, charging, model; a cable reading
+            # adds "wired" as a fifth line so receiver discovery can keep a
+            # real cable reading without reviving stale wireless category data.
+            # The model is the
             # one of the selected source, so a shared receiver names the device
             # whose reading is shown. Nothing connected: no model either.
-            new_state = f"{selected[0]}\n{1 if selected[1] else 0}\n{1 if selected[2] else 0}\n{selected[3]}"
+            new_state = (f"{selected[0]}\n{1 if selected[1] else 0}\n"
+                         f"{1 if selected[2] else 0}\n{selected[3]}"
+                         + ('\nwired' if selected[4] else ''))
             if published_states.get(name) == new_state:
                 return
 
@@ -1114,9 +1120,11 @@ def refresh_once(names):
             continue
         feature = BATTERY_FEATURE_BY_RECEIVER.get(wireless_pid, UNIFIED_BATTERY_FEATURE)
         reading = None
+        is_wired = False
         try:
             if wired_pid is not None:
                 reading = refresh_source(wired_pid, name, feature, wired=True)
+                is_wired = reading is not None
             if reading is None and wireless_pid is not None:
                 reading = refresh_source(wireless_pid, name, feature)
         except Exception as error:
@@ -1124,10 +1132,10 @@ def refresh_once(names):
         if reading is not None:
             current = results.get(name)
             if current is None or reading[0] < current[0]:
-                results[name] = (*reading, model, waybar_signal)
-    for name, (battery, charging, model, waybar_signal) in results.items():
+                results[name] = (*reading, model, waybar_signal, is_wired)
+    for name, (battery, charging, model, waybar_signal, is_wired) in results.items():
         state = {'_source_id': ('refresh', name), '_model': model,
-                 'wired_connected': False}
+                 'wired_connected': is_wired}
         write_state(name, battery, True, charging, waybar_signal, state)
     return 0 if results else 1
 

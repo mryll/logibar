@@ -594,7 +594,7 @@ class StateAggregationTests(unittest.TestCase):
                 self.assertFalse(wired_thread.is_alive())
                 self.assertEqual(
                     (Path(state_dir) / "mouse").read_text(),
-                    "75\n1\n0\n",
+                    "75\n1\n0\n\nwired",
                 )
         finally:
             monitor.STATE_DIR = original_state_dir
@@ -990,9 +990,9 @@ class BusIntegrationTests(unittest.TestCase):
         ])
         with DaemonHarness(bus) as harness:
             harness.threads.extend(harness.module.monitor_device(0xC539, 0xC088, "mouse", 10))
-            harness.wait_for_state("mouse", "55\n1\n1\nG Pro Wireless")
+            harness.wait_for_state("mouse", "55\n1\n1\nG Pro Wireless\nwired")
             bus.emit_battery_event(b"/dev/gpro-wired", voltage=4186, charging=False)
-            harness.wait_for_state("mouse", "100\n1\n0\nG Pro Wireless")
+            harness.wait_for_state("mouse", "100\n1\n0\nG Pro Wireless\nwired")
             report = harness.stop()
             self.assertEqual(report["alive"], [])
             self.assertEqual(report["protocol_errors"], [])
@@ -1116,9 +1116,9 @@ class BusIntegrationTests(unittest.TestCase):
             threads = harness.module.monitor_device(None, 0xC098, "mouse", 10)
             harness.threads.extend(threads)
             self.assertEqual(len(threads), 1)
-            harness.wait_for_state("mouse", "41\n1\n1\nG502 X LIGHTSPEED")
+            harness.wait_for_state("mouse", "41\n1\n1\nG502 X LIGHTSPEED\nwired")
             bus.emit_battery_event(b"/dev/g502-wired", battery=44, charging=True)
-            harness.wait_for_state("mouse", "44\n1\n1\nG502 X LIGHTSPEED")
+            harness.wait_for_state("mouse", "44\n1\n1\nG502 X LIGHTSPEED\nwired")
             report = harness.stop()
             self.assertEqual(report["alive"], [])
             self.assertEqual(report["protocol_errors"], [])
@@ -1186,7 +1186,7 @@ class BusIntegrationTests(unittest.TestCase):
             harness.wait_for_state("mouse", "41\n1\n0\nG502 X LIGHTSPEED")
             bus.plug(FakeNode(b"/dev/sl-wired", 0xC094, FakePairedDevice(
                 kind=0x03, battery=77, charging=True), device_idx=0xFF))
-            harness.wait_for_state("mouse", "77\n1\n1\nPRO X Superlight")
+            harness.wait_for_state("mouse", "77\n1\n1\nPRO X Superlight\nwired")
             report = harness.stop()
             self.assertEqual(report["protocol_errors"], [])
 
@@ -1308,7 +1308,7 @@ class BusIntegrationTests(unittest.TestCase):
         ])
         with DaemonHarness(bus) as harness:
             harness.start_device(0xC54D, 0xC09B, "mouse", 10)
-            harness.wait_for_state("mouse", "77\n1\n1\n")
+            harness.wait_for_state("mouse", "77\n1\n1\n\nwired")
             bus.unplug(b"/dev/sl2-wired")
             harness.wait_for_state("mouse", "50\n1\n0\n")
             report = harness.stop()
@@ -1347,7 +1347,7 @@ class BusIntegrationTests(unittest.TestCase):
             while b"/dev/sl2" in bus.open_paths():
                 self.assertLess(time.monotonic(), deadline, "the receiver stayed open")
                 time.sleep(0.02)
-            self.assertEqual(harness.state_file("mouse").read_text(), "77\n1\n1\n")
+            self.assertEqual(harness.state_file("mouse").read_text(), "77\n1\n1\n\nwired")
             report = harness.stop()
             self.assertEqual(report["protocol_errors"], [])
 
@@ -1374,7 +1374,7 @@ class BusIntegrationTests(unittest.TestCase):
         ])
         with DaemonHarness(bus) as harness:
             harness.start_wired(0xC09B, "mouse", 10)
-            harness.wait_for_state("mouse", "66\n1\n0\n")
+            harness.wait_for_state("mouse", "66\n1\n0\n\nwired")
 
         writes = [list(entry[4]) for entry in bus.log if entry[0] == "write"]
         hidpp_requests = [c for c in writes if c[0] in (0x10, 0x11) and c[2] != 0x80]
@@ -1521,6 +1521,19 @@ class HeadsetStateFileTests(unittest.TestCase):
 
 
 class ForcedRefreshTests(unittest.TestCase):
+    def test_cable_refresh_marks_the_fallback_as_wired(self):
+        cable = FakePairedDevice(kind=0x03, battery=41, name="G502 X LIGHTSPEED")
+        bus = FakeHidBus([FakeNode(b"/dev/cable", 0xC098, cable, device_idx=0xFF)])
+        mod = load_monitor_module(bus)
+        mod.DEVICES = [mod.DEVICES[-1]]
+        mod.subprocess = types.SimpleNamespace(run=lambda *a, **k: None)
+        with tempfile.TemporaryDirectory() as tmp:
+            mod.STATE_DIR = tmp
+            self.assertEqual(mod.refresh_once({"mouse"}), 0)
+            self.assertEqual((Path(tmp) / "mouse").read_text(),
+                             "41\n1\n0\nG502 X LIGHTSPEED\nwired")
+        self.assertEqual(bus.protocol_errors, [])
+
     def test_queries_both_receivers_and_rewrites_fresh_state(self):
         keyboard = FakePairedDevice(kind=0x00, battery_feature=BATTERY_VOLTAGE_FEATURE,
                                     voltage=3989)
@@ -1691,9 +1704,16 @@ class ReceiverDiscoveryTests(unittest.TestCase):
             receiver.devices.clear()
             mod.scan_receivers()
             self.assertEqual(status()['devices'], [])
+            category = Path(mod.STATE_DIR) / 'mouse'
+            category.write_text('90\n1\n0\nMX Master 2S')
+            self.assertEqual(status()['devices'], [])
+            category.write_text('80\n1\n0\nG Pro Wired\nwired')
+            self.assertEqual(status()['devices'][0]['battery'], 80)
             receiver.devices[1] = mouse
             del bus.nodes[b"/dev/unifying"]
             mod.scan_receivers()
+            self.assertEqual(status()['devices'][0]['battery'], 80)
+            category.unlink()
             self.assertEqual(status()['devices'], [])
         self.assertEqual(bus.protocol_errors, [])
 
