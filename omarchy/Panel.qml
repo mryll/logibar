@@ -8,7 +8,7 @@ import qs.Ui
 
 // Logitech battery panel. Owns the `logibar-status --json` data (one source
 // of truth for thresholds and aggregation, shared with the waybar module) and
-// renders one section per connected device: identity glyph, name, an animated
+// renders one section per responding or recently seen device: identity glyph, name, an animated
 // battery meter, bold percent with a charging glyph, and a muted "updated"
 // time from the daemon's last state-file write.
 //
@@ -85,11 +85,18 @@ Panel {
     var out = []
     for (var i = 0; i < status.devices.length; i++) {
       var d = status.devices[i]
-      if (d && d.connected === true && typeof d.battery === "number") out.push(d)
+      if (d && ((d.connected === true && typeof d.battery === "number")
+                || (d.state === "last_known" && typeof d.last_known_battery === "number"))) out.push(d)
     }
     return out
   }
   readonly property int connectedCount: aggregate ? (aggregate.connected_count || 0) : 0
+  readonly property int lastKnownCount: deviceRows.length - connectedCount
+
+  function isLastKnown(device) { return device && device.state === "last_known" }
+  function displayBattery(device) {
+    return isLastKnown(device) ? device.last_known_battery : device.battery
+  }
 
   // Identity glyphs (same Nerd Font icons as the waybar renderers) and the
   // stepped battery glyphs, decile-mapped like the first-party power widget.
@@ -279,18 +286,30 @@ Panel {
   // there has never been data — an error must not look like "disconnected".
   readonly property string faceGlyph: {
     if (!hasData) return loadError !== "" ? "⚠" : ""
-    if (!aggregate || connectedCount === 0 || aggregate.worst_battery === null) return ""
-    return batteryGlyph(aggregate.worst_battery, aggregate.any_charging === true)
+    if (aggregate && connectedCount > 0 && aggregate.worst_battery !== null)
+      return batteryGlyph(aggregate.worst_battery, aggregate.any_charging === true)
+    if (deviceRows.length === 0) return ""
+    var worst = 100
+    for (var i = 0; i < deviceRows.length; i++)
+      worst = Math.min(worst, displayBattery(deviceRows[i]))
+    return batteryGlyph(worst, false)
   }
 
-  readonly property string faceLabel: {
-    if (vertical || !hasData || !aggregate || connectedCount === 0) return ""
+  readonly property var faceEntries: {
     var parts = []
     for (var i = 0; i < deviceRows.length; i++) {
       var d = deviceRows[i]
-      parts.push((identityGlyphs[d.kind || d.id] || batteryGlyph(d.battery, d.charging === true))
-        + " " + d.battery + "%" + (d.charging === true ? " 󰂅" : ""))
+      var stale = isLastKnown(d)
+      parts.push({text: (identityGlyphs[d.kind || d.id] || identityGlyphs.other)
+        + " " + displayBattery(d) + "%" + (stale ? " 󰅐" : (d.charging === true ? " 󰂅" : "")),
+        battery: displayBattery(d), lastKnown: stale})
     }
+    return parts
+  }
+  readonly property string faceLabel: {
+    if (vertical || !hasData) return ""
+    var parts = []
+    for (var i = 0; i < faceEntries.length; i++) parts.push(faceEntries[i].text)
     return parts.join("  ") + (fullRefreshing ? " 󰑐" : "")
   }
 
@@ -312,7 +331,10 @@ Panel {
     var lines = []
     for (var i = 0; i < deviceRows.length; i++) {
       var d = deviceRows[i]
-      lines.push(d.name + ": " + d.battery + "%"
+      if (isLastKnown(d))
+        lines.push(d.name + ": " + d.last_known_battery + "% last known · Not responding"
+          + (d.last_seen_at ? " · Last seen " + lastSeenText(d.last_seen_at) : ""))
+      else lines.push(d.name + ": " + d.battery + "%"
         + (d.charging === true ? " · Charging" : ""))
     }
     if (fullRefreshing) lines.push("Refreshing device readings…")
@@ -327,6 +349,12 @@ Panel {
     var t = new Date(String(iso))
     if (isNaN(t.getTime())) return ""
     return Qt.formatTime(t, "HH:mm")
+  }
+
+  function lastSeenText(iso) {
+    if (!iso) return ""
+    var t = new Date(String(iso))
+    return isNaN(t.getTime()) ? "" : Qt.formatDateTime(t, "MMM d HH:mm")
   }
 
   // ---------------------------------------------------------------- process
@@ -673,9 +701,10 @@ Panel {
           PanelHero {
             width: parent.width
             title: "Logitech"
-            meta: root.connectedCount > 0
-              ? root.connectedCount + (root.connectedCount === 1 ? " device" : " devices")
-              : ""
+            meta: root.lastKnownCount > 0
+              ? root.connectedCount + " active · " + root.lastKnownCount + " last known"
+              : (root.connectedCount > 0
+                ? root.connectedCount + (root.connectedCount === 1 ? " device" : " devices") : "")
             foreground: root.foreground
             fontFamily: root.fontFamily
 
@@ -782,8 +811,9 @@ Panel {
     id: section
     property var device: null
 
-    readonly property int pct: device ? Math.round(Number(device.battery || 0)) : 0
-    readonly property bool charging: device ? device.charging === true : false
+    readonly property int pct: device ? Math.round(Number(root.displayBattery(device) || 0)) : 0
+    readonly property bool lastKnown: root.isLastKnown(device)
+    readonly property bool charging: device && !lastKnown ? device.charging === true : false
 
     // What the meter is painting this frame, rounded exactly like the target
     // so the last frame of a sweep lands on the real figure with no jump.
@@ -801,7 +831,7 @@ Panel {
     //
     // The meter underneath is unaffected: its red origin is a position on a
     // fixed scale, not a claim about this device, so it stays pinned as built.
-    readonly property color rampTint: root.panelRamp(pct)
+    readonly property color rampTint: lastKnown ? root.dim : root.panelRamp(pct)
 
     spacing: Style.space(5)
 
@@ -821,7 +851,7 @@ Panel {
           id: identityGlyph
           text: section.device ? (root.identityGlyphs[section.device.kind || section.device.id] || root.identityGlyphs.other) : ""
           textFormat: Text.PlainText
-          color: root.foreground
+          color: section.lastKnown ? root.dim : root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.icon
           verticalAlignment: Text.AlignVCenter
@@ -830,7 +860,7 @@ Panel {
         Text {
           text: section.device ? String(section.device.name || section.device.id) : ""
           textFormat: Text.PlainText
-          color: root.foreground
+          color: section.lastKnown ? root.dim : root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
           // A Row does not bound its children, so `elide` alone does nothing:
@@ -860,6 +890,7 @@ Panel {
       id: meter
       width: parent.width
       value: section.pct / 100
+      opacity: section.lastKnown ? 0.45 : 1
     }
 
     Item {
@@ -868,7 +899,8 @@ Panel {
 
       Text {
         id: statusLabel
-        text: section.charging ? "Charging" : "On battery"
+        text: section.lastKnown ? "Last known · not responding"
+          : (section.charging ? "Charging" : "On battery")
         textFormat: Text.PlainText
         color: section.charging ? root.mix(root.dim, root.foreground, 0.6) : root.dim
         font.family: root.fontFamily
@@ -883,6 +915,10 @@ Panel {
         // but the line is written in the same house shape the other widgets
         // use in theirs: clock glyph, "Updated HH:MM".
         text: {
+          if (section.lastKnown) {
+            var seen = root.lastSeenText(section.device ? section.device.last_seen_at : "")
+            return seen !== "" ? "󰅐  Seen " + seen : ""
+          }
           var at = root.updatedText(section.device ? section.device.updated_at : "")
           return at !== "" ? "󰅐  Updated " + at : ""
         }

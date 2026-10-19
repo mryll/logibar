@@ -1587,8 +1587,10 @@ class ReceiverDiscoveryTests(unittest.TestCase):
             self.assertEqual([d['kind'] for d in devices],
                              ["keyboard", "mouse", "mouse", "mouse", "other", "keyboard"])
             self.assertTrue(devices[3]['charging'])
-            self.assertEqual((Path(mod.STATE_DIR) / devices[3]['id']).read_text(),
-                             "55\n1\n1\nMX Master 2S")
+            saved = (Path(mod.STATE_DIR) / devices[3]['id']).read_text().splitlines()
+            self.assertEqual(saved[:4], ["55", "1", "1", "MX Master 2S"])
+            self.assertEqual(saved[5], "4069")
+            self.assertLess(abs(int(saved[4]) - int(time.time())), 5)
             env = os.environ.copy()
             env['XDG_RUNTIME_DIR'] = tmp
             with subprocess.Popen([str(SCRIPT.parent / 'logibar-status'), '--json'],
@@ -1627,6 +1629,72 @@ class ReceiverDiscoveryTests(unittest.TestCase):
             self.assertFalse(any(d['kind'] == 'mouse' and d['connected']
                                  for d in sleeping['devices']))
             self.assertEqual(sleeping['aggregate']['connected_count'], 3)
+        self.assertEqual(bus.protocol_errors, [])
+
+    def test_sleep_retains_recent_reading_without_charge_or_old_pairings(self):
+        mouse = FakePairedDevice(kind=0x03, battery=55, charging=True,
+                                 wpid=0x4069, name="MX Master 2S")
+        old = FakePairedDevice(kind=0x03, battery=70, awake=False,
+                               wpid=0x4041, pairing_slot=2, name="MX Master")
+        receiver = FakeReceiver({1: mouse, 2: old})
+        bus = FakeHidBus([FakeNode(b"/dev/unifying", 0xC52B, receiver)])
+        mod = load_monitor_module(bus)
+        mod.RECEIVER_SLOTS = {0xC52B: 2}
+        with tempfile.TemporaryDirectory() as tmp:
+            mod.STATE_DIR = os.path.join(tmp, "logibar")
+            env = os.environ.copy()
+            env['XDG_RUNTIME_DIR'] = tmp
+
+            def status():
+                with subprocess.Popen([str(SCRIPT.parent / 'logibar-status'), '--json'],
+                                      env=env, text=True, stdout=subprocess.PIPE) as proc:
+                    raw, _ = proc.communicate()
+                    self.assertEqual(proc.returncode, 0)
+                return json.loads(raw)
+
+            scanned = mod.scan_receivers()
+            self.assertEqual(status()['devices'][0]['battery'], 55)
+            mouse.awake = False
+            mod.scan_receivers()
+            sleeping = status()
+            recent, never_seen = sleeping['devices']
+            self.assertFalse(recent['connected'])
+            self.assertIsNone(recent['battery'])
+            self.assertEqual(recent['last_known_battery'], 55)
+            self.assertEqual(recent['state'], 'last_known')
+            self.assertIsNotNone(recent['last_seen_at'])
+            self.assertFalse(recent['charging'])
+            self.assertEqual(never_seen['state'], 'disconnected')
+            self.assertIsNone(never_seen['last_known_battery'])
+            self.assertEqual(sleeping['aggregate']['connected_count'], 0)
+            with subprocess.Popen([str(SCRIPT.parent / 'logibar-status')],
+                                  env=env, text=True, stdout=subprocess.PIPE) as proc:
+                raw, _ = proc.communicate()
+                self.assertEqual(proc.returncode, 0)
+            waybar = json.loads(raw)
+            self.assertEqual(waybar['class'], 'last-known')
+            self.assertEqual(waybar['percentage'], 55)
+            self.assertIn('Last known', waybar['tooltip'])
+            self.assertNotIn('Charging', waybar['tooltip'])
+            self.assertNotIn('MX Master<', waybar['tooltip'])
+
+            state_file = Path(mod.STATE_DIR) / scanned[0]['id']
+            lines = state_file.read_text().splitlines()
+            lines[4] = str(int(time.time()) - mod.LAST_KNOWN_SECONDS - 1)
+            state_file.write_text('\n'.join(lines))
+            self.assertEqual(status()['devices'][0]['state'], 'disconnected')
+            self.assertIsNone(status()['devices'][0]['last_known_battery'])
+
+            mouse.awake = True
+            mod.scan_receivers()
+            self.assertTrue(status()['devices'][0]['connected'])
+            receiver.devices.clear()
+            mod.scan_receivers()
+            self.assertEqual(status()['devices'], [])
+            receiver.devices[1] = mouse
+            del bus.nodes[b"/dev/unifying"]
+            mod.scan_receivers()
+            self.assertEqual(status()['devices'], [])
         self.assertEqual(bus.protocol_errors, [])
 
 

@@ -14,6 +14,7 @@ import tempfile
 import argparse
 import hashlib
 import re
+import stat
 
 VID = 0x046d
 # Use XDG_RUNTIME_DIR for secure, atomic state files
@@ -99,6 +100,7 @@ HIDPP20_KIND = {0: 'keyboard', 2: 'keyboard', 3: 'mouse', 4: 'mouse', 5: 'mouse'
 DISCOVERY_SWID = 0x0a
 DISCOVERY_INTERVAL = 300
 DISCOVERY_MANIFEST = 'receiver-devices'
+LAST_KNOWN_SECONDS = 24 * 60 * 60
 MODEL_RE = re.compile(r'^[A-Za-z0-9 ._()+/-]{1,48}$')
 BATTERY_VOLTAGE_LEVELS = (
     (4186, 100),
@@ -1015,12 +1017,47 @@ def atomic_state_write(path, content):
             pass
         raise
 
+def previous_receiver_reading(device, now):
+    """Keep a recent successful reading for the same pairing, never its charge flag."""
+    path = os.path.join(STATE_DIR, device['id'])
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 512:
+                return None
+            lines = os.read(fd, 512).decode('utf-8', errors='replace').splitlines()
+        finally:
+            os.close(fd)
+    except OSError:
+        return None
+    if len(lines) < 4 or lines[3] != device['name']:
+        return None
+    if len(lines) >= 6 and lines[5] != f"{device['wpid']:04x}":
+        return None
+    try:
+        battery = int(lines[0])
+        seen = int(lines[4]) if len(lines) >= 5 else int(info.st_mtime)
+    except ValueError:
+        return None
+    if not 0 <= battery <= 100 or not 0 < seen <= now:
+        return None
+    if len(lines) < 5 and lines[1] != '1':
+        return None
+    if now - seen > LAST_KNOWN_SECONDS:
+        return None
+    return battery, seen
+
 def publish_discovered(devices):
+    now = int(time.time())
     for device in devices:
         battery = device['battery']
-        content = (f"{battery if battery is not None else 0}\n"
-                   f"{1 if battery is not None else 0}\n"
-                   f"{1 if device['charging'] else 0}\n{device['name']}")
+        previous = previous_receiver_reading(device, now) if battery is None else None
+        stored_battery = battery if battery is not None else (previous[0] if previous else 0)
+        last_seen = now if battery is not None else (previous[1] if previous else 0)
+        content = (f"{stored_battery}\n{1 if battery is not None else 0}\n"
+                   f"{1 if battery is not None and device['charging'] else 0}\n"
+                   f"{device['name']}\n{last_seen}\n{device['wpid']:04x}")
         atomic_state_write(os.path.join(STATE_DIR, device['id']), content)
     lines = ['logibar-receivers-v1']
     lines.extend(f"{device['id']}\t{device['kind']}" for device in devices)

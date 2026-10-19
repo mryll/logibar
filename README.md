@@ -28,7 +28,7 @@ The same core drives both frontends, so a number reads the same on either one:
 
 ## Features
 
-- **One widget for all devices.** The Omarchy bar shows each connected device's percentage; one click opens the panel and queries the keyboard and mouse directly. The Waybar face shows the device that needs attention first.
+- **One widget for all devices.** The Omarchy bar shows current readings and clearly marked recent last-known readings; one click opens the panel and queries the keyboard and mouse directly. The Waybar face shows the device that needs attention first.
 - **Receiver discovery.** The HID++ monitor reads pairing slots on supported Unifying and Lightspeed receivers. Multiple active keyboards or mice get separate rows.
 - **Fresh readings.** The existing device monitors listen for HID++ events. Receiver discovery runs at startup, every five minutes, and when the Omarchy widget is clicked.
 - **A real gauge.** The meters go from red at empty, through amber, to green at full. The colors come from your theme.
@@ -52,7 +52,7 @@ The same core drives both frontends, so a number reads the same on either one:
 
 The MX Master 2S support is specific to this fork. The upstream AUR package does not include it; install the monitor from this fork. Direct wired or Bluetooth devices, and other receiver families, may need additional protocol support. The section [Add a device](#add-a-device) gives the procedure.
 
-Receiver discovery no longer needs a model table for devices paired to Unifying (`c52b`, `c532`) or supported Lightspeed (`c539`, `c545`, `c547`, `c54d`) receivers. It reads each pairing slot, asks the device for its name and battery through HID++ 2.0 (`0x1004`, `0x1000`, `0x1001`), and falls back to HID++ 1.0 battery registers (`0x0d`, `0x07`). The Omarchy bar and panel show only devices with a current battery reading; sleeping, out-of-range, or unsupported devices stay hidden. Legacy wired and headset state remains a fallback when the scan has no pairing of that kind. Bolt receivers use different pairing registers and are not covered by this discovery path.
+Receiver discovery no longer needs a model table for devices paired to Unifying (`c52b`, `c532`) or supported Lightspeed (`c539`, `c545`, `c547`, `c54d`) receivers. It reads each pairing slot, asks the device for its name and battery through HID++ 2.0 (`0x1004`, `0x1000`, `0x1001`), and falls back to HID++ 1.0 battery registers (`0x0d`, `0x07`). A device that responded within the past 24 hours remains visible with a dimmed, explicitly **last-known** percentage when it stops replying; the charging icon disappears until a fresh reply confirms charging. The panel shows when that device was last seen. Never-seen pairings and readings older than 24 hours stay hidden, as do pairings absent from the latest receiver scan. A missing reply can mean sleep, power off, out of range, or an unsupported query, so the UI says **Not responding** rather than guessing. Legacy wired and headset state remains a fallback when the scan has no pairing of that kind. Bolt receivers use different pairing registers and are not covered by this discovery path.
 
 In the Omarchy plugin, clicking the bar widget or pressing `r` in its panel forces a fresh HID++ query. It also queries every five minutes. A loading glyph appears beside the bar readings while a query runs. The regular daemon remains event driven. The MX Master 2S can report only charge ranges while charging; a displayed 50% or 90% may be an estimate rather than an exact percentage.
 
@@ -137,7 +137,7 @@ To remove any of them, use the same name with `uninstall`, such as `make uninsta
 
 ### Waybar: one module for every device
 
-The bar shows the battery of the device with the lowest charge. The tooltip gives one block for each connected device: the device with its glyph, a level meter, and one line with the charge state and the time of that device's last reading.
+The bar shows the battery of the responding device with the lowest charge, or a dimmed last-known reading when only recently seen devices remain. The tooltip gives one block for each visible device: its glyph, level meter, and a line with charging or last-known status and the time of its last successful reading.
 
 The time is per device, not per tooltip. Each daemon writes its own device's reading at its own time, so a single "Updated" line would put the newest device's time next to every other device's older number.
 
@@ -242,7 +242,7 @@ The command links this repository into `~/.config/omarchy/plugins/mryll.logibar`
 | `showMouse` | boolean | `true` | Includes the mouse |
 | `showHeadset` | boolean | `true` | Includes the headset |
 
-Mouse buttons: **left** opens the panel, **middle** refreshes the panel. The widget disappears when no device is connected.
+Mouse buttons: **left** opens the panel and refreshes, **middle** refreshes. The widget disappears when no device is responding or has a reading from the past 24 hours.
 
 > [!TIP]
 > After you edit a file in `omarchy/`, run `omarchy restart shell`. A rescan of the plugins does not compile the QML again.
@@ -397,7 +397,8 @@ Change `padding` and `margin` in `~/.config/waybar/style.css`:
 
 | Field | Meaning |
 |---|---|
-| `devices[].state` | `ok`, `warning`, `critical`, or `disconnected` |
+| `devices[].state` | `ok`, `warning`, `critical`, `last_known`, or `disconnected` |
+| `devices[].last_known_battery`, `last_seen_at` | On receiver-discovered devices, the recent battery and time of the last successful query; null when never seen or expired |
 | `devices[].updated_at` | The time when the daemon last wrote this device, in ISO-8601 |
 | `aggregate` | The device with the lowest charge, and the state of the group |
 | `palette` | The colors of the gauge, after the theme and the flags |
@@ -423,7 +424,7 @@ An error is also a JSON document, with an `error` field and the same exit code 0
 ```
 
 1. The **daemons** run as systemd user services and monitor the HID devices.
-2. The daemon writes each change to a **state file** in `$XDG_RUNTIME_DIR/logibar/`, in 4 lines: `battery`, `connected`, `charging`, `model`. Each of these operations is atomic, so a reader never gets half of a file. The `model` line is the entry of the device table that answered (`G Pro Wireless`, `G915 X TKL`, ...); when nothing is connected it is empty. A state file with 3 lines, from an older daemon, is still valid: the widgets then show a generic name.
+2. The daemon writes each change to a **state file** in `$XDG_RUNTIME_DIR/logibar/`, in 4 lines: `battery`, `connected`, `charging`, `model`. Receiver-discovered entries add `last_success_epoch` and the paired device's wireless PID, so a sleeping device can retain a bounded last-known reading without inheriting another device's battery when a slot is reused. Each write is atomic. A 3-line file from an older daemon is still valid; the widgets then show a generic name.
 3. **`logibar-status`** reads these files. It selects the worst device, applies the thresholds, finds the colors, and prints the result. The `model` line becomes the device name in the tooltip, in the JSON (`devices[].name`) and in the Omarchy panel. The widgets accept a model only as ASCII letters, digits, space and `._()+/-`, 1 to 48 characters; any other line (accents, markup, control bytes, a longer name) keeps the generic name, so a file that the widget does not write cannot put markup into the tooltip. A NUL byte is dropped by the shell before the check. The name is the table entry for the receiver that answered. Several mice use the LIGHTSPEED receivers `c539` and `c547`. Thus, the daemon also reads the wireless PID of the paired device from the receiver. If `MODEL_BY_WPID` has that PID for the same device type, the daemon shows the name from `MODEL_BY_WPID`. If not, a mouse shows the name of the entry that matched its receiver. A future change can read the name from the device through HID++ DEVICE_NAME (`0x0005`). That change removes this limit.
 4. For Waybar, the daemons also send `SIGRTMIN+N`. For the Omarchy shell, the plugin monitors the files and runs `logibar-status` again after each change.
 

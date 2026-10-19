@@ -43,14 +43,14 @@
         "key": "showKeyboard",
         "type": "boolean",
         "label": "Show keyboard",
-        "description": "Battery of the connected Logitech keyboard (G915 TKL, G915 X TKL). The panel names the model.",
+        "description": "Show responding keyboards and recent last-known battery readings. The panel names each model.",
         "defaultValue": true
       },
       {
         "key": "showMouse",
         "type": "boolean",
         "label": "Show mouse",
-        "description": "Battery of the connected Logitech mouse (MX Master 2S, G Pro Wireless, PRO X Superlight, PRO X Superlight 2, G502 X LIGHTSPEED). The panel names the model.",
+        "description": "Show responding mice and recent last-known battery readings. The panel names each model.",
         "defaultValue": true
       },
       {
@@ -64,7 +64,7 @@
         "key": "showOther",
         "type": "boolean",
         "label": "Show other devices",
-        "description": "Show paired Logitech devices that are neither a keyboard, mouse, nor headset.",
+        "description": "Show responding devices of other kinds and their recent last-known battery readings.",
         "defaultValue": true
       }
     ]
