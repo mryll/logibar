@@ -2099,6 +2099,34 @@ class ReceiverDiscoveryTests(unittest.TestCase):
         mod.publish_discovered(devices, started)
         self.assertEqual(row.read_text().splitlines()[:2], ["50", "0"])
 
+    def test_the_listener_never_writes_flags_it_could_not_read(self):
+        receiver = FakeReceiver({1: FakePairedDevice(kind=0x03, battery=50, wpid=0x405E)})
+        receiver.notification_flags = 0x000d00
+        bus = FakeHidBus([FakeNode(b"/dev/unifying", 0xC52B, receiver)])
+        mod = load_monitor_module(bus)
+        mod.read_notification_flags = lambda dev: None   # the read gets no answer
+        dev = mod.hid.device()
+        dev.open_path(b"/dev/unifying")
+        self.assertFalse(mod.enable_notifications(dev, blind=False))
+        self.assertEqual(receiver.notification_flags, 0x000d00)
+        self.assertEqual(getattr(receiver, 'notification_writes', []), [])
+
+    def test_a_listener_that_fails_comes_back_with_a_scan(self):
+        receiver = FakeReceiver({1: FakePairedDevice(kind=0x03, battery=50, wpid=0x405E)})
+        bus = FakeHidBus([FakeNode(b"/dev/unifying", 0xC52B, receiver)])
+        mod = load_monitor_module(bus)
+        mod.RECEIVER_SLOTS = {0xC52B: 1}
+        mod.LISTENER_RETRY_SECONDS = 0.2
+        mod.enable_notifications = lambda dev, blind=True: (_ for _ in ()).throw(OSError("transient"))
+        mod.scan_requested.clear()
+        mod.listeners[b"/dev/unifying"] = None
+        mod.listen_receiver(b"/dev/unifying", 1)
+        self.assertNotIn(b"/dev/unifying", mod.listeners)
+        mod.ensure_listeners()
+        self.assertNotIn(b"/dev/unifying", mod.listeners, "no restart before the retry time")
+        self.assertTrue(mod.scan_requested.wait(2), "a scan comes after the retry time")
+        mod.running = False
+
     def test_multiple_models_and_legacy_device_share_receiver(self):
         receiver = FakeReceiver({
             1: FakePairedDevice(kind=0x00, battery=50, legacy_level=73,

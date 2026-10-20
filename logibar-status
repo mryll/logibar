@@ -860,7 +860,17 @@ if $WATCH; then
     load_theme
     emit_once
     mkdir -p "$STATE_DIR" 2>/dev/null
-    while inotifywait -qq -e close_write -e moved_to -e create -e delete "$STATE_DIR" 2>/dev/null; do
+    # A connecting mark expires on its own, with no file event: while one is
+    # shown, wake up after it can have expired (inotifywait exits 2 on the
+    # timeout) and draw again.
+    while true; do
+        _wait=()
+        for _id in "${DEVICES[@]}"; do
+            [[ "${STATE[$_id]}" == "connecting" ]] && { _wait=(-t "$(( CONNECTING_SECONDS + 1 ))"); break; }
+        done
+        inotifywait -qq "${_wait[@]}" -e close_write -e moved_to -e create -e delete "$STATE_DIR" 2>/dev/null
+        _rc=$?
+        (( _rc == 0 || _rc == 2 )) || break
         emit_once
     done
     exit 0
