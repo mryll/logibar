@@ -33,7 +33,6 @@ BATTERY_STATUS_FEATURE = 0x1000
 BATTERY_VOLTAGE_FEATURE = 0x1001
 UNIFIED_BATTERY_FEATURE = 0x1004
 DEVICE_INFO_FEATURE = 0x0003
-DEVICE_KIND = {"keyboard": 0x00, "mouse": 0x03}
 
 # HID++ 2.0 request byte 3 is (function << 4) | software_id, and the device
 # copies it into the response. hidraw hands every input report to every open
@@ -51,48 +50,6 @@ MAX_FEATURE_INDEX = 0x80
 SWID_PROBE = 0x0e
 EVENT_SWID = 0x00
 
-PROBE_RETRY_SECONDS = 5.0
-
-# Wireless lines for the per-category files (`mouse`, `keyboard`) that the
-# single-device Waybar widgets read, with event-driven battery updates.
-# (wireless_pid, name, waybar_signal, model)
-# `model` is the fourth line of the state file, so the frontends can name the
-# device that is actually paired instead of a generic "Logitech mouse". Keep
-# it to printable ASCII, 48 characters at most: the widgets treat the line as
-# foreign input and fall back to a generic name when it does not fit.
-# Devices on a cable are not listed: they are discovered (see "Devices on a
-# cable" below).
-DEVICES = [
-    (0x4069, "mouse", 10, "MX Master 2S"),
-    (0xc539, "mouse", 10, "G Pro Wireless"),
-    (0xc545, "keyboard", 9, "G915 TKL"),
-    (0xc547, "keyboard", 9, "G915 X TKL"),
-    (0xc547, "mouse", 10, "PRO X Superlight"),
-    (0xc54d, "mouse", 10, "PRO X Superlight 2"),
-]
-MODEL_BY_RECEIVER = {(pid, name): model for pid, name, _, model in DEVICES}
-# A receiver PID can carry more than one model of the same kind (c547 pairs
-# the PRO X Superlight and the G502 X LIGHTSPEED), so the table above cannot
-# always name the mouse. The receiver's pairing register names the paired
-# device by its wireless PID; a model listed here replaces the table name
-# for that receiver, but only on a line of the same device type, so a
-# keyboard line never takes a mouse name. Same rules as the table:
-# printable ASCII, 48 at most.
-# wireless_pid -> (device type, model)
-MODEL_BY_WPID = {
-    0x4069: ("mouse", "MX Master 2S"),
-    0x409f: ("mouse", "G502 X LIGHTSPEED"),
-}
-BATTERY_FEATURE_BY_RECEIVER = {
-    0x4069: BATTERY_STATUS_FEATURE,
-    0xc539: BATTERY_VOLTAGE_FEATURE,
-    0xc545: BATTERY_VOLTAGE_FEATURE,
-}
-# On Linux, hid-logitech-dj exposes a paired Unifying device under its WPID
-# (0x4069 for MX Master 2S). Its HID++ messages still use the pairing slot as
-# the device index. Discover that slot rather than assuming slot 1.
-UNIFYING_WPID_BY_PID = {0x4069: 0x4069}
-UNIFYING_MAX_SLOTS = 6
 # Receiver identities are the only hardware list needed for discovery. Paired
 # peripherals are learned from the receiver's pairing register at runtime.
 # Bolt uses different pairing registers and is not in this HID++ 1.0 list.
@@ -121,18 +78,8 @@ BATTERY_VOLTAGE_LEVELS = (
     (3579, 2),
     (3500, 0),
 )
-SHARED_RECEIVER_PIDS = {
-    pid for pid, _, _, _ in DEVICES
-    if sum(device_pid == pid for device_pid, _, _, _ in DEVICES) > 1
-}
-
 running = True
 hid_lock = threading.Lock()
-receiver_kind_lock = threading.Lock()
-receiver_kinds = {}     # path -> (pid, serial, kind)
-probes_in_flight = {}   # path -> wireless_pid of the probing monitor
-probe_retry_at = {}     # path -> monotonic deadline for the next attempt
-probe_generation = {}   # path -> counter, bumped when the path's identity changes
 publish_lock = threading.Lock()
 source_states = {}
 published_states = {}
@@ -209,7 +156,11 @@ def write_state(name, battery, connected, charging, waybar_signal, state):
                     pass
                 raise
             published_states[name] = new_state
-            scan_requested.set()
+            # A cable change can hide or show a receiver row: scan. The
+            # receiver projection comes from a scan or a receiver event and
+            # has nothing new for one.
+            if not state.get('_from_rows'):
+                scan_requested.set()
 
         subprocess.run(["pkill", f"-RTMIN+{waybar_signal}", "waybar"], stderr=subprocess.DEVNULL)
     except:
@@ -339,63 +290,6 @@ def is_pairing_error(r):
     request on the same node."""
     return r[0] == 0x10 and r[2] == 0x8f and r[3] == 0x83 and r[4] == REG_PAIRING_INFO
 
-def read_paired_info(dev, device_idx):
-    """Receiver pairing report for slot device_idx, or None.
-
-    A HID++ 1.0 long-register READ (sub-id 0x83, never the 0x82 write) on
-    the receiver: the answer is a long report (0x11) that echoes the register
-    and sub-register, with the PID in bytes 7 and 8. An empty slot or a
-    receiver without the register answers with an error report (0x8f). hidraw
-    copies every report to every open descriptor, so an error can belong to
-    another reader: an error ends the read only when the node goes quiet, and
-    a matching reply after it still counts. Bounded like every read loop."""
-    sub = PAIRING_INFO_DEVICE_1 + device_idx - 1
-    saw_error = False
-    try:
-        flush_buffer(dev)
-        dev.write([0x10, RECEIVER_IDX, 0x83, REG_PAIRING_INFO, sub, 0x00, 0x00])
-        for _ in range(20):
-            r = dev.read(64, timeout_ms=50)
-            if not r:
-                if saw_error:
-                    break
-                continue
-            if len(r) < 5 or r[1] != RECEIVER_IDX:
-                continue
-            wpid = pairing_reply_wpid(r, sub)
-            if wpid is not None:
-                return r
-            saw_error = saw_error or is_pairing_error(r)
-    except Exception:
-        pass
-    return None
-
-def read_paired_wpid(dev, device_idx):
-    report = read_paired_info(dev, device_idx)
-    return pairing_reply_wpid(report, PAIRING_INFO_DEVICE_1 + device_idx - 1) if report else None
-
-def find_paired_index(dev, wpid):
-    """Find a Unifying device's current slot on its HID++ hidraw node."""
-    for device_idx in range(1, UNIFYING_MAX_SLOTS + 1):
-        if read_paired_wpid(dev, device_idx) == wpid:
-            return device_idx
-    return None
-
-def paired_model(name, wpid):
-    """The MODEL_BY_WPID name for a line of type `name`, or '' so that the
-    table name applies."""
-    kind, model = MODEL_BY_WPID.get(wpid, (None, ''))
-    return model if kind == name else ''
-
-def refresh_paired_model(dev, device_idx, name, state, state_lock, keep_on_no_answer=False):
-    """Name the paired device from MODEL_BY_WPID, or clear the override so
-    the table name applies. After a wake the previous name stays when the
-    receiver gives no wireless PID: a lost reply must not rename the device."""
-    wpid = read_paired_wpid(dev, device_idx)
-    if wpid is None and keep_on_no_answer:
-        return
-    with state_lock:
-        state['_paired_model'] = paired_model(name, wpid)
 
 def get_feature_index(dev, device_idx, feature_id, swid=SWID_MONITOR, retries=3):
     """Get a HID++ feature index with retries. ROOT getFeature is function 0,
@@ -416,155 +310,6 @@ def get_feature_index(dev, device_idx, feature_id, swid=SWID_MONITOR, retries=3)
             time.sleep(0.2 * (attempt + 1))  # Backoff
     return None
 
-def read_device_type(dev, feat_idx):
-    """One getDeviceType request; returns the raw kind byte or None."""
-    request = 0x20 | SWID_PROBE
-    flush_buffer(dev)
-    dev.write([0x11, 0x01, feat_idx, request] + [0] * 16)
-    for _ in range(20):
-        r = dev.read(64, timeout_ms=50)
-        if r and len(r) > 4 and r[0] == 0x11 and r[1] == 0x01 and r[2] == feat_idx and r[3] == request:
-            return r[4]
-    return None
-
-def read_stable_kind(dev, feat_idx):
-    """Trust a kind only when two consecutive reads agree."""
-    previous_kind = None
-    for _ in range(3):
-        kind = read_device_type(dev, feat_idx)
-        if kind is None:
-            continue
-        if kind not in DEVICE_KIND.values():
-            return None
-        if kind == previous_kind:
-            return kind
-        previous_kind = kind
-    return None
-
-def get_device_kind(path):
-    """Read the paired device kind when a receiver PID is shared."""
-    dev = hid.device()
-    try:
-        dev.open_path(path)
-        enable_notifications(dev)
-        feat_idx = get_feature_index(dev, 0x01, DEVICE_NAME_FEATURE, swid=SWID_PROBE)
-        if not feat_idx:
-            return None
-        return read_stable_kind(dev, feat_idx)
-    except Exception as error:
-        print(f"logibar-hidpp-monitor: kind probe failed for {path!r}: {error}", file=sys.stderr)
-        return None
-    finally:
-        try:
-            dev.close()
-        except:
-            pass
-
-def serials_by_path(devs):
-    serials = {}
-    for record in devs:
-        serials.setdefault(record['path'], record.get('serial_number') or '')
-    return serials
-
-def serial_of(devs, path):
-    return serials_by_path(devs).get(path, '')
-
-def drop_reused_paths(wireless_pid, serials):
-    """A new serial under a known path means the kernel reused the node.
-    Caller holds receiver_kind_lock."""
-    for path, serial in serials.items():
-        cached = receiver_kinds.get(path)
-        if cached and cached[0] == wireless_pid and cached[1] != serial:
-            del receiver_kinds[path]
-            probe_generation[path] = probe_generation.get(path, 0) + 1
-
-def cached_matches(wireless_pid, serials, wanted_kind):
-    """Paths whose cached kind answers this monitor. Caller holds the lock."""
-    return [
-        path for path in serials
-        if receiver_kinds.get(path, (None, None, None))[0] == wireless_pid
-        and receiver_kinds[path][2] == wanted_kind
-    ]
-
-def next_probe_target(wireless_pid, serials):
-    """First path with no cached kind that is neither being probed by another
-    thread nor inside its retry backoff. Caller holds the lock."""
-    now = time.monotonic()
-    for path in serials:
-        cached = receiver_kinds.get(path)
-        if cached and cached[0] == wireless_pid:
-            continue
-        if path in probes_in_flight or now < probe_retry_at.get(path, 0.0):
-            continue
-        return path
-    return None
-
-def publish_probe_result(wireless_pid, serials, path, generation, kind):
-    """Store one probe result, unless the receiver changed while the probe
-    ran — a stale result must never describe a reused path. Caller holds
-    the lock."""
-    if probe_generation.get(path, 0) != generation:
-        return
-    if kind is None:
-        probe_retry_at[path] = time.monotonic() + PROBE_RETRY_SECONDS
-        return
-    probe_retry_at.pop(path, None)
-    receiver_kinds[path] = (wireless_pid, serials[path], kind)
-
-def receiver_path_for_device(wireless_pid, name, devs, preferred_path=None):
-    if wireless_pid not in SHARED_RECEIVER_PIDS:
-        return devs[0]['path']
-    forget_receiver_kinds(wireless_pid, devs)
-    serials = serials_by_path(devs)
-    wanted_kind = DEVICE_KIND[name]
-    # Bounded: every pass either returns or probes a path that afterwards is
-    # cached or inside its backoff, so it cannot be picked again.
-    for _ in range(2 * len(serials) + 2):
-        with receiver_kind_lock:
-            drop_reused_paths(wireless_pid, serials)
-            matches = cached_matches(wireless_pid, serials, wanted_kind)
-            if matches:
-                return preferred_path if preferred_path in matches else matches[0]
-            target = next_probe_target(wireless_pid, serials)
-            if target is None:
-                return None
-            probes_in_flight[target] = wireless_pid
-            generation = probe_generation.get(target, 0)
-        kind = get_device_kind(target)
-        with receiver_kind_lock:
-            probes_in_flight.pop(target, None)
-            publish_probe_result(wireless_pid, serials, target, generation, kind)
-    return None
-
-def forget_receiver_kinds(wireless_pid, devs):
-    if wireless_pid not in SHARED_RECEIVER_PIDS:
-        return
-    active_paths = {device['path'] for device in devs}
-    with receiver_kind_lock:
-        cached_stale = [
-            path for path, (pid, _, _) in receiver_kinds.items()
-            if pid == wireless_pid and path not in active_paths
-        ]
-        for path in cached_stale:
-            del receiver_kinds[path]
-            probe_retry_at.pop(path, None)
-        # A probe still in flight for a vanished path must not publish its
-        # result over whatever reuses the node: bump its generation too.
-        inflight_stale = [
-            path for path, pid in probes_in_flight.items()
-            if pid == wireless_pid and path not in active_paths
-        ]
-        for path in set(cached_stale) | set(inflight_stale):
-            probe_generation[path] = probe_generation.get(path, 0) + 1
-
-def invalidate_receiver_kind(wireless_pid, path, serial):
-    """Drop one cache entry, but never an entry a newer receiver already
-    replaced under the same path."""
-    with receiver_kind_lock:
-        cached = receiver_kinds.get(path)
-        if cached and cached[0] == wireless_pid and cached[1] == serial:
-            del receiver_kinds[path]
-            probe_generation[path] = probe_generation.get(path, 0) + 1
 
 def voltage_to_percentage(voltage):
     if voltage >= BATTERY_VOLTAGE_LEVELS[0][0]:
@@ -623,101 +368,6 @@ def close_quietly(dev):
             pass
     return None
 
-def disconnect_wireless(dev, name, waybar_signal, state, state_lock):
-    dev = close_quietly(dev)
-    with state_lock:
-        was_connected = state.get('wireless_connected')
-        state['wireless_connected'] = False
-        if was_connected:
-            write_state(name, 0, False, False, waybar_signal, state)
-    return None
-
-def publish_wireless_battery(name, waybar_signal, state, state_lock, soc, charging, feat_idx):
-    with state_lock:
-        state['wireless_connected'] = True
-        state['battery'] = soc
-        state['charging'] = charging
-        state['feat_idx'] = feat_idx
-        state['_requery_due'] = False
-        write_state(name, soc, True, charging, waybar_signal, state)
-
-def requery_wireless_battery(dev, device_idx, name, waybar_signal, battery_feature, state, state_lock):
-    """Query and publish the wireless battery. A query with no answer marks
-    the state so that retry_failed_requery tries again, whoever asked."""
-    feat_idx = get_feature_index(dev, device_idx, battery_feature)
-    soc, charging = (None, None)
-    if feat_idx:
-        soc, charging = query_battery(dev, device_idx, feat_idx, battery_feature)
-    if soc is None:
-        with state_lock:
-            state['_requery_due'] = True
-        return False
-    publish_wireless_battery(name, waybar_signal, state, state_lock, soc, charging, feat_idx)
-    return True
-
-def drop_suspect_receiver(dev, wireless_pid, opened):
-    """A shared receiver that answered the kind probe but cannot complete one
-    battery cycle may be cached under the wrong kind: forget it and let the
-    probe backoff decide when to look again. Unique-PID receivers never come
-    here — closing them would break the passive wait for the wake event."""
-    invalidate_receiver_kind(wireless_pid, opened[0], opened[1])
-    with receiver_kind_lock:
-        probe_retry_at[opened[0]] = time.monotonic() + PROBE_RETRY_SECONDS
-    return close_quietly(dev)
-
-def close_if_path_changed(dev, opened, current_path, wireless_pid):
-    if dev is None or opened[0] == current_path:
-        return dev
-    invalidate_receiver_kind(wireless_pid, opened[0], opened[1])
-    return close_quietly(dev)
-
-def handle_connection_event(r, dev, device_idx, name, waybar_signal, battery_feature, state, state_lock):
-    link_off = r[4] & 0x40
-    if not link_off:
-        # Device woke up - query battery. A wake can also follow a new
-        # pairing, so read the paired model again first.
-        time.sleep(0.2)
-        refresh_paired_model(dev, device_idx, name, state, state_lock, keep_on_no_answer=True)
-        requery_wireless_battery(dev, device_idx, name, waybar_signal, battery_feature, state, state_lock)
-        return
-    # Device disconnected/off - hide widget. No retry while it is away: the
-    # link-on event queries again.
-    with state_lock:
-        was_connected = state.get('wireless_connected')
-        state['wireless_connected'] = False
-        state['_requery_due'] = False
-        if was_connected:
-            write_state(name, 0, False, False, waybar_signal, state)
-
-def handle_battery_broadcast(r, device_idx, name, waybar_signal, battery_feature, state, state_lock):
-    with state_lock:
-        feat_idx = state.get('feat_idx')
-    if not feat_idx or len(r) <= 6:
-        return
-    # A broadcast event carries software id 0; a request echo does not.
-    if r[0] != 0x11 or r[1] != device_idx or r[2] != feat_idx or r[3] != EVENT_SWID:
-        return
-    soc, charging = decode_battery_report(battery_feature, r)
-    if soc is None:
-        return
-    with state_lock:
-        old_battery = state.get('battery')
-        old_charging = state.get('charging')
-        state['battery'] = soc
-        state['charging'] = charging
-        state['wireless_connected'] = True
-        if soc != old_battery or charging != old_charging:
-            write_state(name, soc, True, charging, waybar_signal, state)
-
-def handle_wireless_report(r, dev, device_idx, name, waybar_signal, battery_feature, state, state_lock):
-    if not r or len(r) <= 4:
-        return
-    # Connection event (0x41): byte 3 is event data, not a software-id echo
-    if r[2] == 0x41 and r[1] == device_idx:
-        handle_connection_event(r, dev, device_idx, name, waybar_signal, battery_feature, state, state_lock)
-        return
-    # Battery broadcast event (long HID++ 0x11)
-    handle_battery_broadcast(r, device_idx, name, waybar_signal, battery_feature, state, state_lock)
 
 # A battery query that gets no answer is tried again after this delay, which
 # doubles up to the cap. Without it, a reply lost at startup left the widget
@@ -728,115 +378,6 @@ REQUERY_MAX_DELAY = 60.0
 def next_requery_delay(delay):
     return min(delay * 2, REQUERY_MAX_DELAY)
 
-def retry_failed_requery(retry, dev, device_idx, name, waybar_signal, battery_feature, state, state_lock):
-    """Retry a battery query that got no answer (startup or wake), with a
-    growing delay. `retry` holds the schedule: 'at' and 'delay'."""
-    with state_lock:
-        due = state.get('_requery_due')
-    if not due:
-        retry['at'] = None
-        retry['delay'] = REQUERY_FIRST_DELAY
-        return
-    now = time.monotonic()
-    if retry['at'] is None:
-        retry['at'] = now + retry['delay']
-        return
-    if now < retry['at']:
-        return
-    if not requery_wireless_battery(dev, device_idx, name, waybar_signal, battery_feature, state, state_lock):
-        retry['delay'] = next_requery_delay(retry['delay'])
-        retry['at'] = time.monotonic() + retry['delay']
-
-def monitor_wireless(wireless_pid, name, waybar_signal, battery_feature, state, state_lock):
-    device_idx = 0x01
-    dev = None
-    opened = None  # (path, serial) of the open receiver
-    retry = {'at': None, 'delay': REQUERY_FIRST_DELAY}
-    # A device on its cable can keep its link quiet, and come back to the
-    # receiver with no link event: when a cable device goes, read again.
-    seen_unplugs = cable_unplugs[0]
-
-    while running:
-        try:
-            devs = safe_enumerate(VID, wireless_pid)
-
-            if not devs:
-                forget_receiver_kinds(wireless_pid, devs)
-                dev = disconnect_wireless(dev, name, waybar_signal, state, state_lock)
-                opened = None
-                time.sleep(0.5)
-                continue
-
-            current_path = receiver_path_for_device(wireless_pid, name, devs, opened[0] if opened else None)
-            if current_path is None:
-                dev = disconnect_wireless(dev, name, waybar_signal, state, state_lock)
-                opened = None
-                time.sleep(0.5)
-                continue
-
-            dev = close_if_path_changed(dev, opened, current_path, wireless_pid)
-            if dev is None:
-                dev = hid.device()
-                dev.open_path(current_path)
-                # NO set_nonblocking - we want blocking read with timeout
-                opened = (current_path, serial_of(devs, current_path))
-
-                time.sleep(0.1)
-                enable_notifications(dev)
-                if wireless_pid in UNIFYING_WPID_BY_PID:
-                    device_idx = find_paired_index(dev, UNIFYING_WPID_BY_PID[wireless_pid])
-                    if device_idx is None:
-                        dev = disconnect_wireless(dev, name, waybar_signal, state, state_lock)
-                        opened = None
-                        time.sleep(0.5)
-                        continue
-                refresh_paired_model(dev, device_idx, name, state, state_lock)
-
-                # Try to query battery with retries
-                queried = requery_wireless_battery(dev, device_idx, name, waybar_signal, battery_feature, state, state_lock)
-                if not queried and wireless_pid in SHARED_RECEIVER_PIDS:
-                    dev = drop_suspect_receiver(dev, wireless_pid, opened)
-                    opened = None
-                    time.sleep(0.5)
-                    continue
-
-            if cable_unplugs[0] != seen_unplugs:
-                seen_unplugs = cable_unplugs[0]
-                enable_notifications(dev)
-                requery_wireless_battery(dev, device_idx, name, waybar_signal, battery_feature, state, state_lock)
-            retry_failed_requery(retry, dev, device_idx, name, waybar_signal, battery_feature, state, state_lock)
-
-            # Blocking read with timeout - true event-driven
-            r = dev.read(64, timeout_ms=1000)
-            handle_wireless_report(r, dev, device_idx, name, waybar_signal, battery_feature, state, state_lock)
-
-        except Exception:
-            if opened and wireless_pid in SHARED_RECEIVER_PIDS:
-                invalidate_receiver_kind(wireless_pid, opened[0], opened[1])
-            dev = disconnect_wireless(dev, name, waybar_signal, state, state_lock)
-            opened = None
-            time.sleep(0.5)
-
-def monitor_device(wireless_pid, name, waybar_signal, model=None):
-    battery_feature = BATTERY_FEATURE_BY_RECEIVER.get(wireless_pid, UNIFIED_BATTERY_FEATURE)
-    if model is None:
-        model = MODEL_BY_RECEIVER.get((wireless_pid, name), '')
-    state = {
-        '_source_id': (wireless_pid, name),
-        '_model': model,
-        'wireless_connected': False,
-        'battery': None,
-        'charging': None,
-        'feat_idx': None,
-    }
-    state_lock = threading.Lock()
-    thread = threading.Thread(
-        target=monitor_wireless,
-        args=(wireless_pid, name, waybar_signal, battery_feature, state, state_lock),
-        daemon=True,
-    )
-    thread.start()
-    return [thread]
 
 # ---- Devices on a cable ----
 #
@@ -859,6 +400,7 @@ cable_monitors = {}      # path -> monitor thread
 cable_skipped = set()    # paths that are no cable device, until the node set changes
 cable_skip_key = [None]  # the hidraw fingerprint cable_skipped belongs to
 receiver_row_wpids = {}  # rx row id -> wireless PID, from the last scan
+receiver_row_battery = {}  # rx row id -> (battery feature, its index), from the last scan
 
 def sysfs_hid_device(path):
     """The resolved sysfs directory of a hidraw node's HID device."""
@@ -934,7 +476,6 @@ CABLE_SILENT_TRIES = 3   # then the node waits for a change of the node set
 CABLE_PUBLISH_SECONDS = 1.0
 cable_failures = {}      # path -> probes with no answer, in this node set
 cable_retry_at = {}      # path -> monotonic time of the next probe
-cable_unplugs = [0]      # bumped when a cable device goes: the wireless lines read again
 
 def monitor_cable(path, pid, generation):
     """Probe one cable node, then publish its battery from the device's own
@@ -989,8 +530,6 @@ def monitor_cable(path, pid, generation):
         with cable_lock:
             if cable_monitors.get(path) is threading.current_thread():
                 del cable_monitors[path]
-            if state is not None:
-                cable_unplugs[0] += 1
             if cable_skip_key[0] != generation:
                 rescan = True   # the node set changed during the probe
             elif outcome == 'other':
@@ -1182,6 +721,8 @@ def hidpp10_battery(dev, slot):
     return None, None
 
 def hidpp20_battery(dev, slot):
+    """(battery, charging, feature, index): the feature and its index let
+    the receiver listener decode the device's own battery events."""
     for feature in (UNIFIED_BATTERY_FEATURE, BATTERY_STATUS_FEATURE,
                     BATTERY_VOLTAGE_FEATURE):
         outcome, index = discovery_feature_index(dev, slot, feature)
@@ -1194,15 +735,15 @@ def hidpp20_battery(dev, slot):
             continue
         battery, charging = decode_battery_report(feature, report)
         if battery is not None:
-            return battery, charging
-    return None, None
+            return battery, charging, feature, index
+    return None, None, None, None
 
 def generic_battery(dev, slot, protocol):
     if protocol == 'hidpp20':
         return hidpp20_battery(dev, slot)
     if protocol == 'hidpp10':
-        return hidpp10_battery(dev, slot)
-    return None, None
+        return hidpp10_battery(dev, slot) + (None, None)
+    return None, None, None, None
 
 def pairing_exchange(dev, slot):
     """One pairing-register read: ('reply', report), ('error', code) or
@@ -1269,11 +810,12 @@ def discover_receiver_devices():
                     protocol, feature_kind, feature_name = hidpp20_identity(dev, slot)
                     kind = feature_kind or kind
                     name = name or feature_name
-                    battery, charging = generic_battery(dev, slot, protocol)
+                    battery, charging, feature, index = generic_battery(dev, slot, protocol)
                     devices.append({
                         'id': f'rx-{receiver_id}-{slot}', 'kind': kind,
                         'name': model_name(name, kind, wpid), 'wpid': wpid,
                         'battery': battery, 'charging': bool(charging) if battery is not None else False,
+                        'battery_feature': feature, 'battery_index': index,
                     })
             except Exception as error:
                 print(f'logibar-hidpp-monitor: receiver {pid:04x} scan failed: {error}',
@@ -1346,15 +888,18 @@ def publish_discovered(devices, started=None):
     """`started`: when the scan began (time.time()). A connecting mark the
     link listener wrote after that is newer than this scan's view of the
     device, so a scan that found no answer keeps it instead of erasing it."""
-    global receiver_row_wpids
+    global receiver_row_wpids, receiver_row_battery
     now = int(time.time())
     for device in devices:
         with rows_lock:
             publish_receiver_row(device, started, now)
     receiver_row_wpids = {device['id']: device['wpid'] for device in devices}
+    receiver_row_battery = {device['id']: (device['battery_feature'], device['battery_index'])
+                            for device in devices if device.get('battery_index')}
     lines = ['logibar-receivers-v1']
     lines.extend(f"{device['id']}\t{device['kind']}" for device in devices)
     atomic_state_write(os.path.join(STATE_DIR, DISCOVERY_MANIFEST), '\n'.join(lines) + '\n')
+    publish_categories()
 
 def publish_receiver_row(device, started, now):
     """Write one receiver row; the caller holds rows_lock. A link-down newer
@@ -1465,6 +1010,61 @@ def on_link_change(row_id, link_off):
             except OSError:
                 pass
     scan_requested.set()
+    publish_categories()
+
+def on_battery_event(row_id, report):
+    """A battery event of a device that the last scan found: rewrite its
+    row at once, like the scan would. An event from a slot or a feature
+    index the scan does not know is not a battery reading."""
+    feature, index = receiver_row_battery.get(row_id, (None, None))
+    if not index or report[2] != index:
+        return
+    battery, charging = decode_battery_report(feature, report)
+    if battery is None:
+        return
+    path = os.path.join(STATE_DIR, row_id)
+    with rows_lock:
+        raw = read_small_file(path, 512)
+        lines = raw.decode('utf-8', errors='replace').splitlines()[:6] if raw else []
+        if len(lines) != 6:
+            return
+        lines[0:3] = [str(battery), '1', '1' if charging else '0']
+        lines[4] = str(int(time.time()))
+        try:
+            atomic_state_write(path, '\n'.join(lines))
+        except OSError:
+            return
+    publish_categories()
+
+# The single-device widgets (logibar-mouse, logibar-keyboard) read one file
+# per kind. It is a projection of the receiver rows: the connected device of
+# that kind with the lowest battery, with its own name, the same device the
+# combined widget and the Omarchy panel show. A cable reading still wins in
+# write_state.
+categories_lock = threading.Lock()
+
+def publish_categories():
+    raw = read_small_file(os.path.join(STATE_DIR, DISCOVERY_MANIFEST), 4096)
+    rows = []
+    for line in (raw.decode('utf-8', errors='replace').splitlines()[1:] if raw else []):
+        row_id, _, kind = line.partition('\t')
+        if kind not in CABLE_KINDS:
+            continue
+        content = read_small_file(os.path.join(STATE_DIR, row_id), 512)
+        fields = content.decode('utf-8', errors='replace').splitlines() if content else []
+        if len(fields) < 4 or fields[1] != '1' or not fields[0].isdigit():
+            continue
+        rows.append((kind, min(int(fields[0]), 100), fields[2] == '1', fields[3]))
+    with categories_lock:
+        for kind in CABLE_KINDS:
+            state = {'_source_id': ('rx', kind), '_from_rows': True}
+            mine = [row for row in rows if row[0] == kind]
+            if mine:
+                _, battery, charging, name = min(mine, key=lambda row: row[1])
+                state['_model'] = name if MODEL_RE.fullmatch(name) else ''
+                write_state(kind, battery, True, charging, CATEGORY_SIGNAL[kind], state)
+            else:
+                write_state(kind, 0, False, False, CATEGORY_SIGNAL[kind], state)
 
 def listen_receiver(path, max_slots):
     rx = receiver_hash(path)
@@ -1488,9 +1088,18 @@ def listen_receiver(path, max_slots):
         scan_requested.set()
         while running:
             r = dev.read(64, timeout_ms=LISTEN_TIMEOUT_MS)
-            if (r and len(r) > 4 and r[0] == 0x10 and r[2] == 0x41
-                    and 1 <= r[1] <= max_slots):
+            if not r or len(r) <= 4 or not 1 <= r[1] <= max_slots:
+                continue
+            if r[0] == 0x10 and r[2] == 0x41:
                 on_link_change(f'rx-{rx}-{r[1]}', bool(r[4] & LINK_OFF))
+            elif r[0] == 0x11 and r[3] == EVENT_SWID and len(r) > 6:
+                # A HID++ 2.0 event: a battery reading when it comes from
+                # the battery feature index the scan found for that slot.
+                on_battery_event(f'rx-{rx}-{r[1]}', r)
+            elif r[0] == 0x10 and r[2] in (0x07, 0x0d):
+                # A HID++ 1.0 device reports its battery register: no index
+                # to decode against, so the scan reads it.
+                scan_requested.set()
     except Exception:
         # Unplugged (read raises) or a transient error: a scan in a few
         # seconds starts a new listener if the receiver is still there,
@@ -1657,12 +1266,8 @@ def main():
     pid_line = f'{os.getpid()} {process_start_time(os.getpid())}\n'
     atomic_state_write(pid_file, pid_line)
 
-    threads = []
-    scanner = threading.Thread(target=receiver_scan_loop, daemon=True)
-    scanner.start()
+    threading.Thread(target=receiver_scan_loop, daemon=True).start()
     threading.Thread(target=watch_hotplug, daemon=True).start()
-    for wireless_pid, name, waybar_signal, model in DEVICES:
-        threads.extend(monitor_device(wireless_pid, name, waybar_signal, model))
 
     while running:
         time.sleep(1)

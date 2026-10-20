@@ -507,6 +507,9 @@ def load_monitor_module(bus):
             spec = importlib.util.spec_from_loader(name, loader)
             module = importlib.util.module_from_spec(spec)
             loader.exec_module(module)
+            # Never signal the test host's Waybar.
+            module.subprocess = types.SimpleNamespace(
+                run=lambda *args, **kwargs: None, DEVNULL=subprocess.DEVNULL)
         finally:
             if original is None:
                 sys.modules.pop("hid", None)
@@ -539,15 +542,6 @@ class DaemonHarness:
 
     # -- selective start ------------------------------------------------
 
-    def start_wireless(self, wireless_pid, name, signal, battery_feature=None,
-                       barrier=None, state=None, state_lock=None):
-        state = state or self._fresh_state(wireless_pid, name)
-        feature = battery_feature or UNIFIED_BATTERY_FEATURE
-        self._spawn(self.module.monitor_wireless,
-                    (wireless_pid, name, signal, feature, state,
-                     state_lock or threading.Lock()), barrier)
-        return state
-
     def start_cable(self, path, pid, barrier=None):
         """One cable monitor, as ensure_cable_monitors starts it."""
         self._spawn(self.module.monitor_cable,
@@ -556,15 +550,6 @@ class DaemonHarness:
     def set_receiver_rows(self, rows):
         """What the last receiver scan found: {row id: wireless PID}."""
         self.module.receiver_row_wpids = dict(rows)
-
-    def _fresh_state(self, wireless_pid, name="mouse"):
-        return {
-            '_source_id': (wireless_pid, name),
-            'wireless_connected': False,
-            'battery': None,
-            'charging': None,
-            'feat_idx': None,
-        }
 
     def _spawn(self, target, args, barrier):
         def wrapped():
