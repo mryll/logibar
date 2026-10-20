@@ -1392,7 +1392,9 @@ def listen_receiver(path, max_slots):
     dev = hid.device()
     try:
         dev.open_path(path)
-        enable_notifications(dev, blind=False)
+        if not enable_notifications(dev, blind=False):
+            print(f'logibar-hidpp-monitor: receiver {path!r} did not answer the notification '
+                  'register read; its devices appear with the next scan', file=sys.stderr)
         # The register exchange above reads and drops whatever arrives, a
         # link event included: one scan covers that window.
         scan_requested.set()
