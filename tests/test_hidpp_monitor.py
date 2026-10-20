@@ -1515,6 +1515,26 @@ class CableDiscoveryTests(unittest.TestCase):
         module.ensure_cable_monitors()
         self.harness.wait_for_state("mouse", "64\n1\n0\nPRO X 2\nwired")
 
+    def test_a_monitor_that_fails_on_a_present_node_waits_before_the_next(self):
+        # The device answered its probe, then its read failed while the node
+        # stays listed. Its last write asks for a scan, as every change does;
+        # that scan must not start a monitor at once, or each one fails again.
+        module = self.harness.module
+        module.CABLE_RETRY_SECONDS = 0.5
+        module.hidraw_fingerprint = lambda: (("hidraw2", 1),)
+        module.ensure_cable_monitors()
+        self.harness.wait_for_state("mouse", "64\n1\n0\nPRO X 2\nwired")
+        self.bus.close_all()   # the next read fails; the node is still there
+        deadline = time.monotonic() + 5
+        while b"/dev/cable" in module.cable_monitors:
+            self.assertLess(time.monotonic(), deadline, "the monitor never ended")
+            time.sleep(0.02)
+        self.assertEqual(module.cable_failures.get(b"/dev/cable"), 1)
+        module.ensure_cable_monitors()
+        self.assertNotIn(b"/dev/cable", module.cable_monitors, "a new monitor before the wait")
+        module.scan_requested.clear()
+        self.assertTrue(module.scan_requested.wait(2), "no scan after the wait")
+
     def test_a_late_reply_does_not_give_its_index_to_the_next_lookup(self):
         # The name lookup's reply comes late, during the battery lookup. With
         # one software id for both, the battery index became the name

@@ -985,7 +985,7 @@ def monitor_cable(path, pid, generation):
         if state is not None:
             state['wired_connected'] = False
             write_state(name, 0, False, False, signal, state)
-        rescan = state is not None
+        rescan = False
         with cable_lock:
             if cable_monitors.get(path) is threading.current_thread():
                 del cable_monitors[path]
@@ -995,7 +995,10 @@ def monitor_cable(path, pid, generation):
                 rescan = True   # the node set changed during the probe
             elif outcome == 'other':
                 cable_skipped.add(path)
-            elif outcome == 'silent' and state is None:
+            else:
+                # No answer, or a monitor that failed on a node that may still
+                # be there: try again later, never at once. An unplug changes
+                # the node set, which clears this count.
                 tries = cable_failures.get(path, 0) + 1
                 cable_failures[path] = tries
                 if tries >= CABLE_SILENT_TRIES:
