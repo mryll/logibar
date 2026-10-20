@@ -5,7 +5,7 @@
 # Severity thresholds and aggregation live HERE, once — every frontend (waybar,
 # Omarchy shell) consumes this script instead of re-deciding.
 #
-# Usage: logibar-status [--help] [--json] [--watch] [--devices LIST]
+# Usage: logibar-status [--help] [--json] [--watch] [--devices LIST] [--last-known]
 #                       [--no-color[=all|bar|tooltip]]
 #                       [--color-normal HEX] [--color-warning HEX] [--color-critical HEX]
 #                       [--tooltip-font NAME]
@@ -15,6 +15,13 @@
 #   --json      structured document (schema_version 1): devices[] + aggregate
 #   --watch     stream waybar JSON, one line per state change (needs inotifywait)
 #   --devices   comma-separated subset of: keyboard,mouse,headset,other (default: all)
+#   --last-known
+#               keep a receiver device that stopped answering, with its last
+#               reading from the past 24 hours (state "last_known"). Default:
+#               such a device is disconnected, like one that is off. The
+#               receiver cannot tell asleep from off, so with this flag a
+#               sleeping mouse stays visible, and without it the mouse goes
+#               until it answers again.
 #   --tooltip-font FONT
 #               font family (or Pango family list) the tooltip is pinned to.
 #               Default: "JetBrainsMono Nerd Font Mono, JetBrainsMono Nerd
@@ -182,6 +189,7 @@ CLI_COLOR_CRITICAL=""
 # ese nombre caía en la proporcional del sistema sin decir nada.
 TOOLTIP_FONT="JetBrainsMono Nerd Font, JetBrainsMono Nerd Font Mono, monospace"
 WATCH=false
+SHOW_LAST_KNOWN=false
 PLAIN_SURFACES=""   # "" | all | bar | tooltip — which surfaces drop color
 _nc=""
 DEVICES=("${DEVICE_IDS[@]}")
@@ -203,6 +211,7 @@ while [[ $# -gt 0 ]]; do
         --help|-h) show_help ;;
         --json) shift ;;   # consumed by the pre-scan
         --watch) WATCH=true; shift ;;
+        --last-known) SHOW_LAST_KNOWN=true; shift ;;
         --devices)
             [[ $# -ge 2 ]] || cli_error "--devices requires a value"
             REQUESTED_ALL=false
@@ -327,7 +336,7 @@ read_one_device() {
         now=$(date +%s)
         if (( epoch <= now && now - epoch <= LAST_KNOWN_SECONDS )); then
             LAST_SEEN[$id]=$(date -Iseconds -d "@$epoch" 2>/dev/null)
-            if [[ "$connected" != "1" ]]; then
+            if [[ "$connected" != "1" ]] && $SHOW_LAST_KNOWN; then
                 LAST_KNOWN[$id]="$battery"
                 STATE[$id]="last_known"
             fi

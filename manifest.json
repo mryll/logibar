@@ -23,7 +23,9 @@
       "showMouse": true,
       "showHeadset": true,
       "showOther": true,
-      "colorMode": "full"
+      "colorMode": "full",
+      "barFace": "lowest",
+      "showLastKnown": false
     },
     "schema": [
       {
@@ -40,17 +42,29 @@
         "defaultValue": "full"
       },
       {
+        "key": "barFace",
+        "type": "enum",
+        "label": "Bar face",
+        "description": "lowest: one battery glyph and the lowest battery. icon: the glyph alone; the panel shows the numbers. devices: one value for each device.",
+        "options": [
+          "lowest",
+          "icon",
+          "devices"
+        ],
+        "defaultValue": "lowest"
+      },
+      {
         "key": "showKeyboard",
         "type": "boolean",
         "label": "Show keyboard",
-        "description": "Show responding keyboards and recent last-known battery readings. The panel names each model.",
+        "description": "Show responding keyboards. The panel names each model.",
         "defaultValue": true
       },
       {
         "key": "showMouse",
         "type": "boolean",
         "label": "Show mouse",
-        "description": "Show responding mice and recent last-known battery readings. The panel names each model.",
+        "description": "Show responding mice. The panel names each model.",
         "defaultValue": true
       },
       {
@@ -64,8 +78,15 @@
         "key": "showOther",
         "type": "boolean",
         "label": "Show other devices",
-        "description": "Show responding devices of other kinds and their recent last-known battery readings.",
+        "description": "Show responding devices of other kinds.",
         "defaultValue": true
+      },
+      {
+        "key": "showLastKnown",
+        "type": "boolean",
+        "label": "Keep silent devices",
+        "description": "Keep a device that stops answering, dimmed, with its last reading from the past 24 hours. The receiver cannot tell asleep from off: off, a sleeping device goes until it answers again.",
+        "defaultValue": false
       }
     ]
   }

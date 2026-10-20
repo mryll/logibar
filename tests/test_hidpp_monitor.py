@@ -1728,7 +1728,7 @@ class ClickRefreshTests(unittest.TestCase):
 
 
 class ReceiverDiscoveryTests(unittest.TestCase):
-    def _status_with(self, files):
+    def _status_with(self, files, flags=("--last-known",)):
         with tempfile.TemporaryDirectory() as tmp:
             state = Path(tmp) / "logibar"
             state.mkdir()
@@ -1736,7 +1736,7 @@ class ReceiverDiscoveryTests(unittest.TestCase):
                 (state / name).write_text(content)
             env = os.environ.copy()
             env['XDG_RUNTIME_DIR'] = tmp
-            done = subprocess.run([str(SCRIPT.parent / 'logibar-status'), '--json'],
+            done = subprocess.run([str(SCRIPT.parent / 'logibar-status'), '--json', *flags],
                                   env=env, text=True, capture_output=True, timeout=30)
             self.assertEqual(done.returncode, 0)
             return json.loads(done.stdout)
@@ -1766,6 +1766,19 @@ class ReceiverDiscoveryTests(unittest.TestCase):
         })
         self.assertEqual(sorted((d['id'], d['state']) for d in status['devices']),
                          [("mouse", "ok"), ("rx-11223344-1", "last_known")])
+
+    def test_without_last_known_a_silent_device_is_disconnected(self):
+        # The default: the receiver cannot tell asleep from off, and a device
+        # that does not answer goes, like one that is off.
+        now = int(time.time())
+        files = {
+            "receiver-devices": "logibar-receivers-v1\nrx-11223344-1\tmouse\n",
+            "rx-11223344-1": f"55\n0\n0\nMX Master 2S\n{now - 600}\n4069",
+        }
+        [device] = self._status_with(files, flags=())['devices']
+        self.assertEqual((device['state'], device['last_known_battery']), ("disconnected", None))
+        [device] = self._status_with(files)['devices']
+        self.assertEqual((device['state'], device['last_known_battery']), ("last_known", 55))
 
     def test_a_cable_with_no_receiver_of_its_family_hides_no_row(self):
         now = int(time.time())
@@ -2072,8 +2085,9 @@ class ReceiverDiscoveryTests(unittest.TestCase):
             env = os.environ.copy()
             env['XDG_RUNTIME_DIR'] = tmp
 
-            def status():
-                with subprocess.Popen([str(SCRIPT.parent / 'logibar-status'), '--json'],
+            def status(*flags):
+                with subprocess.Popen([str(SCRIPT.parent / 'logibar-status'), '--json',
+                                       '--last-known', *flags],
                                       env=env, text=True, stdout=subprocess.PIPE) as proc:
                     raw, _ = proc.communicate()
                     self.assertEqual(proc.returncode, 0)
@@ -2094,7 +2108,7 @@ class ReceiverDiscoveryTests(unittest.TestCase):
             self.assertEqual(never_seen['state'], 'disconnected')
             self.assertIsNone(never_seen['last_known_battery'])
             self.assertEqual(sleeping['aggregate']['connected_count'], 0)
-            with subprocess.Popen([str(SCRIPT.parent / 'logibar-status')],
+            with subprocess.Popen([str(SCRIPT.parent / 'logibar-status'), '--last-known'],
                                   env=env, text=True, stdout=subprocess.PIPE) as proc:
                 raw, _ = proc.communicate()
                 self.assertEqual(proc.returncode, 0)

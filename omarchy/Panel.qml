@@ -130,6 +130,17 @@ Panel {
     var v = String(setting("colorMode", "full"))
     return ["full", "none", "bar-only", "panel-only"].indexOf(v) >= 0 ? v : "full"
   }
+  // Bar face: "lowest" is one glyph and the lowest battery (the Waybar
+  // face too), "icon" the glyph alone, "devices" one value per device.
+  // An unknown value normalizes to "lowest", the face before 0.7.0.
+  readonly property string barFace: {
+    var v = String(setting("barFace", "lowest"))
+    return ["lowest", "icon", "devices"].indexOf(v) >= 0 ? v : "lowest"
+  }
+  // Off: a receiver device that stops answering goes, like one that is off.
+  // The receiver cannot tell asleep from off. On: it stays, dimmed, with its
+  // last reading from the past 24 hours (`logibar-status --last-known`).
+  readonly property bool showLastKnown: setting("showLastKnown", false) === true
   readonly property bool barColored:   colorMode === "full" || colorMode === "bar-only"
   readonly property bool panelColored: colorMode === "full" || colorMode === "panel-only"
 
@@ -295,6 +306,9 @@ Panel {
     return batteryGlyph(worst, false)
   }
 
+  // One glyph and one number, like every widget of the family: the device
+  // that needs attention first. The panel is the per-device view. With no
+  // device answering, the worst last-known value shows, dimmed by the bar.
   readonly property var faceEntries: {
     var parts = []
     for (var i = 0; i < deviceRows.length; i++) {
@@ -307,11 +321,16 @@ Panel {
     return parts
   }
   readonly property string faceLabel: {
-    if (vertical || !hasData) return ""
-    var parts = []
-    for (var i = 0; i < faceEntries.length; i++) parts.push(faceEntries[i].text)
-    return parts.join("  ") + (fullRefreshing ? " 󰑐" : "")
+    if (vertical || !hasData || barFace === "icon") return ""
+    if (aggregate && connectedCount > 0 && aggregate.worst_battery !== null)
+      return aggregate.worst_battery + "%"
+    if (deviceRows.length === 0) return ""
+    var worst = 100
+    for (var i = 0; i < deviceRows.length; i++)
+      worst = Math.min(worst, displayBattery(deviceRows[i]))
+    return worst + "%"
   }
+  readonly property bool faceLastKnown: hasData && connectedCount === 0 && deviceRows.length > 0
 
   // Glyph and number share this one color, so the bar element reads as a
   // single unit — and it is the ramp color at the very percentage shown.
@@ -468,8 +487,11 @@ Panel {
     }
     // Every kind enabled (the default) passes no filter: a CLI older than
     // this plugin does not know "other" and rejects the whole list.
-    startRun(devs.length === 4 ? [binName, "--json"]
-                               : [binName, "--json", "--devices", devs.join(",")])
+    // Off (the default) adds no flag either, for the same reason.
+    var cmd = devs.length === 4 ? [binName, "--json"]
+                                : [binName, "--json", "--devices", devs.join(",")]
+    if (showLastKnown) cmd.push("--last-known")
+    startRun(cmd)
   }
 
   function startRun(cmd) {
@@ -819,6 +841,52 @@ Panel {
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             wrapMode: Text.WordWrap
+          }
+
+          // ---------- Refresh footer ----------
+          // The family's shape: status on the left, the refresh button on
+          // the right, at the bottom of the panel. The scan runs here, never
+          // as a glyph in the bar, which would shift the bar's other widgets.
+          PanelSeparator {
+            visible: root.hasData
+            foreground: root.foreground
+          }
+
+          Item {
+            visible: root.hasData
+            width: parent.width
+            implicitHeight: Math.max(refreshStatus.implicitHeight, refreshButton.implicitHeight)
+
+            Text {
+              id: refreshStatus
+              anchors.left: parent.left
+              anchors.right: refreshButton.left
+              anchors.rightMargin: Style.spacing.sm
+              anchors.verticalCenter: parent.verticalCenter
+              text: root.fullRefreshing ? "Scanning receivers…" : root.refreshError
+              textFormat: Text.PlainText
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
+            }
+
+            PanelActionButton {
+              id: refreshButton
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              // nf-md-refresh (U+F0450), written literally: a JS "\u" escape
+              // takes exactly four hex digits.
+              iconText: "󰑐"
+              tooltipText: "Refresh now"
+              foreground: root.dim
+              hoverColor: root.foreground
+              fontFamily: root.fontFamily
+              fontSize: Style.font.caption
+              size: Style.space(20)
+              enabled: !root.fullRefreshing
+              onClicked: root.requestFullRefresh()
+            }
           }
 
         }
