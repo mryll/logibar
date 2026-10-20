@@ -937,6 +937,8 @@ def publish_receiver_row(device, started, now):
         if marked is not None and marked >= started:
             content += f"\n{CONNECTING_MARK}"
     atomic_state_write(os.path.join(STATE_DIR, device['id']), content)
+    if started is not None:
+        row_scanned_at[device['id']] = started
 
 def scan_receivers():
     started = time.time()
@@ -1029,18 +1031,35 @@ def on_link_change(row_id, link_off):
                 pass
     scan_requested.set()
     if not link_off:
-        # The scan right after a link-up can miss a device that is still
-        # waking: one more, a few seconds later.
-        retry = threading.Timer(LINK_UP_RETRY_SECONDS, scan_requested.set)
-        retry.daemon = True
-        retry.start()
+        arm_link_up_retry()
     publish_categories()
 
+def arm_link_up_retry():
+    """The scan right after a link-up can miss a device that is still
+    waking: one more, a few seconds later. One timer at a time, however
+    many link-ups arrive."""
+    with link_retry_lock:
+        if link_retry_armed[0]:
+            return
+        link_retry_armed[0] = True
+
+    def fire():
+        with link_retry_lock:
+            link_retry_armed[0] = False
+        scan_requested.set()
+
+    retry = threading.Timer(LINK_UP_RETRY_SECONDS, fire)
+    retry.daemon = True
+    retry.start()
+
 LINK_UP_RETRY_SECONDS = 5.0
+link_retry_lock = threading.Lock()
+link_retry_armed = [False]
 BATTERY_EVENT_SECONDS = 1.0
 battery_event_at = {}     # row id -> time.time() of its last battery event
 battery_written_at = {}   # row id -> time.time() of its last event write
-pending_battery = {}      # row id -> (battery, charging), not written yet
+row_scanned_at = {}       # row id -> start of the last scan that wrote the row
+pending_battery = {}      # row id -> (battery, charging, wpid, event time), not written yet
 
 def on_battery_event(row_id, report):
     """A battery event of a device that the last scan found. An event from
@@ -1053,8 +1072,9 @@ def on_battery_event(row_id, report):
         battery, charging = decode_battery_report(feature, report)
         if battery is None:
             return
-        battery_event_at[row_id] = time.time()
-        pending_battery[row_id] = (battery, charging)
+        now = time.time()
+        battery_event_at[row_id] = now
+        pending_battery[row_id] = (battery, charging, receiver_row_wpids.get(row_id), now)
     flush_battery_events()
 
 def flush_battery_events():
@@ -1064,16 +1084,21 @@ def flush_battery_events():
     written = False
     now = time.time()
     with rows_lock:
-        for row_id, (battery, charging) in list(pending_battery.items()):
+        for row_id, (battery, charging, wpid, event_at) in list(pending_battery.items()):
             if now - battery_written_at.get(row_id, 0) < BATTERY_EVENT_SECONDS:
                 continue
             del pending_battery[row_id]
             battery_written_at[row_id] = now
-            wpid = receiver_row_wpids.get(row_id)
+            # Anything newer than the event wins: a link-down, a scan, or
+            # a new pairing in the slot.
+            if (link_down_at.get(row_id, 0) >= event_at
+                    or row_scanned_at.get(row_id, 0) >= event_at
+                    or wpid is None or receiver_row_wpids.get(row_id) != wpid):
+                continue
             path = os.path.join(STATE_DIR, row_id)
             raw = read_small_file(path, 512)
             lines = raw.decode('utf-8', errors='replace').splitlines()[:6] if raw else []
-            if wpid is None or len(lines) != 6 or lines[5] != f"{wpid:04x}":
+            if len(lines) != 6 or lines[5] != f"{wpid:04x}":
                 continue
             reading = [str(battery), '1', '1' if charging else '0']
             if lines[0:3] == reading:

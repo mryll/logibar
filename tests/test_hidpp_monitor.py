@@ -857,6 +857,72 @@ class CategoryProjectionTests(unittest.TestCase):
         self.assertEqual((state / "keyboard").read_text(), "55\n1\n0\nG915 TKL")
 
 
+    def pending_case(self):
+        """A scanned M720 and an event waiting for its write: the waiting
+        reading is 30 %, the scan heard 50 %."""
+        _, mod, devices, state = self.scan([FakeNode(b"/dev/unifying", 0xC52B, FakeReceiver({
+            1: FakePairedDevice(kind=0x03, battery=50, wpid=0x405E, name="M720 Triathlon")}))],
+            slots={0xC52B: 1})
+        row_id = devices[0]['id']
+        mod.battery_written_at[row_id] = time.time()   # the last write was just now
+        _, index = mod.receiver_row_battery[row_id]
+        mod.on_battery_event(row_id, [0x11, 0x01, index, 0x00, 30, 0x00, 0x00])
+        self.assertIn(row_id, mod.pending_battery)
+        mod.battery_written_at[row_id] = 0               # the second has passed
+        return mod, devices, state / row_id
+
+    def test_a_waiting_reading_is_written_when_nothing_newer_came(self):
+        mod, _, row = self.pending_case()
+        mod.flush_battery_events()
+        self.assertEqual(row.read_text().splitlines()[0], "30")
+
+    def test_a_waiting_reading_never_undoes_a_later_link_down(self):
+        mod, devices, row = self.pending_case()
+        mod.on_link_change(devices[0]['id'], True)
+        mod.flush_battery_events()
+        self.assertEqual(row.read_text().splitlines()[:2], ["50", "0"])
+
+    def test_a_waiting_reading_never_undoes_a_later_scan(self):
+        mod, devices, row = self.pending_case()
+        time.sleep(0.01)
+        devices[0]['battery'] = 90
+        mod.publish_discovered(devices, time.time())
+        mod.flush_battery_events()
+        self.assertEqual(row.read_text().splitlines()[0], "90")
+
+    def test_a_waiting_reading_never_goes_to_a_new_pairing(self):
+        mod, devices, row = self.pending_case()
+        mod.receiver_row_wpids[devices[0]['id']] = 0x4093
+        lines = row.read_text().splitlines()
+        lines[5] = "4093"
+        row.write_text("\n".join(lines))
+        mod.flush_battery_events()
+        self.assertEqual(row.read_text().splitlines()[0], "50")
+
+    def test_many_link_ups_arm_one_retry(self):
+        _, mod, devices, _ = self.scan([FakeNode(b"/dev/unifying", 0xC52B, FakeReceiver({
+            1: FakePairedDevice(kind=0x03, battery=50, wpid=0x405E, name="M720 Triathlon")}))],
+            slots={0xC52B: 1})
+        timers = []
+        real_timer = threading.Timer
+
+        def counting(*args, **kwargs):
+            timer = real_timer(*args, **kwargs)
+            timers.append(timer)
+            return timer
+
+        mod.LINK_UP_RETRY_SECONDS = 0.3
+        mod.threading = types.SimpleNamespace(Timer=counting, Lock=threading.Lock,
+                                              Thread=threading.Thread, Event=threading.Event,
+                                              current_thread=threading.current_thread)
+        for _ in range(50):
+            mod.on_link_change(devices[0]['id'], False)
+        self.assertEqual(len(timers), 1)
+        mod.scan_requested.clear()
+        self.assertTrue(mod.scan_requested.wait(2))
+        mod.on_link_change(devices[0]['id'], False)   # fired: the next one arms again
+        self.assertEqual(len(timers), 2)
+
 class ReceiverBatteryEventTests(unittest.TestCase):
     """A battery event from a paired device updates its row and its kind's
     file at once, with no scan, like the old per-device monitors did."""
