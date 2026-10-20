@@ -12,6 +12,7 @@ import subprocess
 import threading
 import tempfile
 import argparse
+import itertools
 import hashlib
 import re
 import stat
@@ -41,8 +42,12 @@ DEVICE_KIND = {"keyboard": 0x00, "mouse": 0x03}
 # requester therefore signs with its own id and accepts only its own echo.
 # Events carry software id 0, which is why requests must never use 0.
 SWID_MONITOR = 0x0d
+# A feature index is the third byte of every later request to that feature.
+# From 0x80 up that byte is a HID++ 1.0 register sub-id (0x80 and 0x82 are
+# register WRITES), so an index the device claims there is never used: a
+# hostile device must not steer a battery read into a register write.
+MAX_FEATURE_INDEX = 0x80
 SWID_PROBE = 0x0e
-SWID_REFRESH = 0x0b
 EVENT_SWID = 0x00
 
 PROBE_RETRY_SECONDS = 5.0
@@ -66,6 +71,9 @@ DEVICES = [
     (None, 0xc098, "mouse", 10, "G502 X LIGHTSPEED"),
 ]
 MODEL_BY_PIDS = {(wireless, wired): model for wireless, wired, _, _, model in DEVICES}
+# The receiver family of a cable-only line, for the "wired rx-..." line: the
+# CLI hides the silent receiver row of the device that is on its cable.
+CABLE_RECEIVER = {0xc098: 0xc547}
 # A receiver PID can carry more than one model of the same kind (c547 pairs
 # the PRO X Superlight and the G502 X LIGHTSPEED), so the table above cannot
 # always name the mouse. The receiver's pairing register names the paired
@@ -97,7 +105,6 @@ RECEIVER_SLOTS = {
 }
 PAIRING_KIND = {1: 'keyboard', 2: 'mouse', 3: 'keyboard', 8: 'mouse', 13: 'headset'}
 HIDPP20_KIND = {0: 'keyboard', 2: 'keyboard', 3: 'mouse', 4: 'mouse', 5: 'mouse'}
-DISCOVERY_SWID = 0x0a
 DISCOVERY_INTERVAL = 300
 DISCOVERY_MANIFEST = 'receiver-devices'
 LAST_KNOWN_SECONDS = 24 * 60 * 60
@@ -138,10 +145,28 @@ def signal_handler(sig, frame):
     global running
     running = False
 
+def receiver_ids(receiver_pid):
+    """The `rx-<id>` prefixes receiver discovery gives the receivers of
+    this family: the same paths, the same hash."""
+    if receiver_pid not in RECEIVER_SLOTS:
+        return ()
+    try:
+        return tuple(sorted({f"rx-{receiver_hash(node['path'])}"
+                             for node in safe_enumerate(VID, receiver_pid)}))
+    except Exception:
+        return ()
+
+def receiver_hash(path):
+    return hashlib.blake2s(path, digest_size=4).hexdigest()
+
 def write_state(name, battery, connected, charging, waybar_signal, state):
-    """Publish the lowest connected source for a logical device."""
+    """Publish a connected cable, else the lowest connected source, for a
+    logical device."""
     os.makedirs(STATE_DIR, exist_ok=True, mode=0o700)
     state_file = f"{STATE_DIR}/{name}"
+    wired = bool(state.get('wired_connected'))
+    wireless_pid, wired_pid = state['_source_id']
+    receivers = receiver_ids(wireless_pid or CABLE_RECEIVER.get(wired_pid)) if wired else ()
 
     try:
         with publish_lock:
@@ -152,18 +177,27 @@ def write_state(name, battery, connected, charging, waybar_signal, state):
             paired = '' if state.get('wired_connected') else state.get('_paired_model')
             model = paired or state.get('_model', '')
             sources[state['_source_id']] = (battery, connected, charging, model,
-                                            bool(state.get('wired_connected')))
+                                            wired, receivers)
             connected_sources = [source for source in sources.values() if source[1]]
-            selected = min(connected_sources, key=lambda source: source[0]) if connected_sources else (0, False, False, '', False)
+            # A cable reading wins over a lower wireless one: every wireless
+            # line in DEVICES sits on a receiver that discovery scans, so
+            # that reading already has its own receiver row, and the cable
+            # one has no other place to show.
+            pool = [source for source in connected_sources if source[4]] or connected_sources
+            selected = min(pool, key=lambda source: source[0]) if pool else (0, False, False, '', False, ())
             # Four lines: battery, connected, charging, model; a cable reading
             # adds "wired" as a fifth line so receiver discovery can keep a
             # real cable reading without reviving stale wireless category data.
+            # The fifth line also names the receivers of the cable device's
+            # family ("wired rx-1a2b3c4d"): the CLI hides only the silent
+            # rows on those receivers, never a sleeping device elsewhere.
             # The model is the
             # one of the selected source, so a shared receiver names the device
             # whose reading is shown. Nothing connected: no model either.
             new_state = (f"{selected[0]}\n{1 if selected[1] else 0}\n"
                          f"{1 if selected[2] else 0}\n{selected[3]}"
-                         + ('\nwired' if selected[4] else ''))
+                         + ('\nwired' + ''.join(f' {rx}' for rx in selected[5])
+                            if selected[4] else ''))
             if published_states.get(name) == new_state:
                 return
 
@@ -184,6 +218,7 @@ def write_state(name, battery, connected, charging, waybar_signal, state):
                     pass
                 raise
             published_states[name] = new_state
+            scan_requested.set()
 
         subprocess.run(["pkill", f"-RTMIN+{waybar_signal}", "waybar"], stderr=subprocess.DEVNULL)
     except:
@@ -326,8 +361,7 @@ def refresh_paired_model(dev, device_idx, name, state, state_lock, keep_on_no_an
     with state_lock:
         state['_paired_model'] = paired_model(name, wpid)
 
-def get_feature_index(dev, device_idx, feature_id, swid=SWID_MONITOR, retries=3,
-                      read_count=20):
+def get_feature_index(dev, device_idx, feature_id, swid=SWID_MONITOR, retries=3):
     """Get a HID++ feature index with retries. ROOT getFeature is function 0,
     so the request byte is the bare software id, and only a response echoing
     that id belongs to this caller."""
@@ -336,10 +370,10 @@ def get_feature_index(dev, device_idx, feature_id, swid=SWID_MONITOR, retries=3,
             flush_buffer(dev)
             cmd = [0x10, device_idx, 0x00, swid, feature_id >> 8, feature_id & 0xff, 0x00]
             dev.write(cmd)
-            for _ in range(read_count):
+            for _ in range(20):
                 r = dev.read(64, timeout_ms=50)
                 if r and len(r) > 4 and r[0] in [0x10, 0x11] and r[1] == device_idx and r[2] == 0x00 and r[3] == swid:
-                    return r[4]
+                    return r[4] if r[4] < MAX_FEATURE_INDEX else None
         except:
             pass
         if attempt < retries - 1:
@@ -530,9 +564,9 @@ def decode_battery_report(battery_feature, report):
             return voltage_to_percentage(voltage), bool(report[6] & 0x80)
     return None, None
 
-def query_battery(dev, device_idx, feat_idx, battery_feature, swid=SWID_MONITOR):
+def query_battery(dev, device_idx, feat_idx, battery_feature):
     function = 0x10 if battery_feature == UNIFIED_BATTERY_FEATURE else 0x00
-    request = function | swid
+    request = function | SWID_MONITOR
     try:
         flush_buffer(dev)
         cmd = [0x11, device_idx, feat_idx, request] + [0] * 16
@@ -903,25 +937,103 @@ def receiver_codename(dev, slot):
         pass
     return ''
 
-def feature_request(dev, slot, index, function, payload=(), swid=DISCOVERY_SWID):
-    request = function | swid
+# Discovery talks to a receiver that a monitor thread may also have open, and
+# hidraw hands every reply to every descriptor. A ROOT getFeature reply does
+# not say which feature it resolves, and a getDeviceName reply does not say
+# which offset it answers, so a reply that arrives after its request timed
+# out matched the NEXT request with the same software id: a 0x1004 index was
+# taken as the 0x1000 one, and its getCapabilities byte (0x07) was published
+# as a 7 % battery. Every discovery request therefore signs with the next id
+# of its own rotation — every id but the monitor (0x0d), the kind probe
+# (0x0e) and events (0x00) — and accepts only its own echo. A late reply
+# carries an id nobody is waiting for, and is dropped, as long as fewer than
+# thirteen requests went out after it: more than one device's whole exchange
+# (a five-id rotation came back to the late id on the same device).
+DISCOVERY_SWIDS = (0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
+                   0x0b, 0x0c, 0x0f)
+DISCOVERY_READS = 20     # 50 ms each: the same 1 s the monitor gives a reply
+DISCOVERY_ATTEMPTS = 2   # a slow first reply after idle gets one more try
+BUSY_RETRY_SECONDS = 0.1
+ERR_INVALID_SUBID = 0x01  # HID++ 1.0 error: the device speaks HID++ 1.0
+ERR_BUSY = 0x07           # HID++ 1.0 (0x8f): the receiver is busy
+ERR20_BUSY = 0x08         # HID++ 2.0 (0xff): the device is busy
+_discovery_swids = itertools.cycle(DISCOVERY_SWIDS)
+
+def next_discovery_swid():
+    """Only the scanner thread sends discovery requests, so the rotation
+    needs no lock."""
+    return next(_discovery_swids)
+
+def discovery_exchange(dev, report, slot, sub_id, request):
+    """Send one request; return ('reply', r), ('error', code), ('busy',
+    code) or ('timeout', None). A reply echoes (slot, sub_id, request); an
+    error from the receiver (0x8f) or the device (0xff) echoes (sub_id,
+    request), so a request signed with its own software id can stop at its
+    own error. Busy is told apart by its sender: 0x08 from the receiver is
+    "unknown device" (asleep), which no retry fixes."""
     try:
         flush_buffer(dev)
-        dev.write([0x11, slot, index, request] + list(payload)[:16] + [0] * (16 - min(16, len(payload))))
-        for _ in range(12):
+        dev.write(report)
+        for _ in range(DISCOVERY_READS):
             r = dev.read(64, timeout_ms=50)
-            if (r and len(r) >= 5 and r[0] in (0x10, 0x11)
-                    and (r[1], r[2], r[3]) == (slot, index, request)):
-                return r
+            if not r or len(r) < 6 or r[0] not in (0x10, 0x11) or r[1] != slot:
+                continue
+            if (r[2], r[3]) == (sub_id, request):
+                return 'reply', r
+            if r[2] in (0x8f, 0xff) and (r[3], r[4]) == (sub_id, request):
+                if (r[2], r[5]) in ((0x8f, ERR_BUSY), (0xff, ERR20_BUSY)):
+                    return 'busy', r[5]
+                return 'error', r[5]
     except Exception:
         pass
-    return None
+    return 'timeout', None
+
+def discovery_feature_index(dev, slot, feature_id):
+    """ROOT getFeature: ('reply', index) — 0 when the feature is absent —,
+    ('error', code), ('busy', code) or ('timeout', None). Busy gets the same
+    second try as silence."""
+    outcome = ('timeout', None)
+    for attempt in range(DISCOVERY_ATTEMPTS):
+        if attempt and outcome[0] == 'busy':
+            time.sleep(BUSY_RETRY_SECONDS)
+        swid = next_discovery_swid()
+        outcome = discovery_exchange(
+            dev, [0x10, slot, 0x00, swid, feature_id >> 8, feature_id & 0xff, 0x00],
+            slot, 0x00, swid)
+        if outcome[0] == 'reply':
+            index = outcome[1][4]
+            return 'reply', (index if index < MAX_FEATURE_INDEX else 0)
+        if outcome[0] == 'error':
+            return outcome
+    return outcome
+
+def feature_request(dev, slot, index, function, payload=()):
+    """The reply report, or None. A busy device gets one more try."""
+    payload = list(payload)[:16]
+    for attempt in range(DISCOVERY_ATTEMPTS):
+        if attempt:
+            time.sleep(BUSY_RETRY_SECONDS)
+        request = function | next_discovery_swid()
+        kind, r = discovery_exchange(
+            dev, [0x11, slot, index, request] + payload + [0] * (16 - len(payload)),
+            slot, index, request)
+        if kind != 'busy':
+            break
+    return r if kind == 'reply' else None
 
 def hidpp20_identity(dev, slot):
-    index = get_feature_index(dev, slot, DEVICE_NAME_FEATURE,
-                              swid=DISCOVERY_SWID, retries=1, read_count=4)
+    """(protocol, kind, name). The protocol is 'hidpp20' when ROOT answers,
+    'hidpp10' when the device rejects the HID++ 2.0 request as an unknown
+    sub-id, and None when nothing answers usefully (asleep, off, out of
+    range): then no battery query is worth sending."""
+    outcome, value = discovery_feature_index(dev, slot, DEVICE_NAME_FEATURE)
+    if outcome == 'error':
+        return ('hidpp10' if value == ERR_INVALID_SUBID else None), None, ''
+    if outcome != 'reply':
+        return None, None, ''
+    index = value
     if not index:
-        return None, ''
+        return 'hidpp20', None, ''
     kind_reply = feature_request(dev, slot, index, 0x20)
     kind = HIDPP20_KIND.get(kind_reply[4], 'other') if kind_reply else None
     length_reply = feature_request(dev, slot, index, 0x00)
@@ -933,40 +1045,90 @@ def hidpp20_identity(dev, slot):
             if not part or len(part) <= 4:
                 break
             name.extend(part[4:4 + min(length - len(name), len(part) - 4)])
-    return kind, bytes(name).decode('utf-8', errors='replace')
+    return 'hidpp20', kind, bytes(name).decode('utf-8', errors='replace')
 
 def hidpp10_battery(dev, slot):
-    """Legacy 0x0d percentage or 0x07 approximate charge level."""
+    """Legacy 0x0d percentage or 0x07 approximate charge level. A register
+    reply echoes its register, so it cannot be taken for another one."""
     for register in (0x0d, 0x07):
-        try:
-            flush_buffer(dev)
-            dev.write([0x10, slot, 0x81, register, 0, 0, 0])
-            for _ in range(4):
-                r = dev.read(64, timeout_ms=50)
-                if not r or len(r) < 7 or r[0] not in (0x10, 0x11):
-                    continue
-                if (r[1], r[2], r[3]) != (slot, 0x81, register):
-                    continue
-                if register == 0x0d and 0 <= r[4] <= 100:
-                    return r[4], (r[6] & 0xf0) == 0x50
-                if register == 0x07 and r[4] in (1, 3, 5, 7):
-                    return {1: 5, 3: 20, 5: 50, 7: 90}[r[4]], (r[5] & 0x21) == 0x21
-        except Exception:
-            pass
+        for attempt in range(DISCOVERY_ATTEMPTS):
+            if attempt:
+                time.sleep(BUSY_RETRY_SECONDS)
+            outcome, r = discovery_exchange(dev, [0x10, slot, 0x81, register, 0, 0, 0],
+                                            slot, 0x81, register)
+            if outcome != 'busy':
+                break
+        if outcome != 'reply' or len(r) < 7:
+            continue
+        if register == 0x0d and 0 <= r[4] <= 100:
+            return r[4], (r[6] & 0xf0) == 0x50
+        if register == 0x07 and r[4] in (1, 3, 5, 7):
+            return {1: 5, 3: 20, 5: 50, 7: 90}[r[4]], (r[5] & 0x21) == 0x21
     return None, None
 
-def generic_battery(dev, slot):
+def hidpp20_battery(dev, slot):
     for feature in (UNIFIED_BATTERY_FEATURE, BATTERY_STATUS_FEATURE,
                     BATTERY_VOLTAGE_FEATURE):
-        index = get_feature_index(dev, slot, feature,
-                                  swid=DISCOVERY_SWID, retries=1, read_count=4)
-        if not index:
+        outcome, index = discovery_feature_index(dev, slot, feature)
+        if outcome != 'reply' or not index:
             continue
-        battery, charging = query_battery(dev, slot, index, feature,
-                                          swid=DISCOVERY_SWID)
+        # 0x1004 getStatus is function 1; 0x1000 and 0x1001 answer function 0.
+        function = 0x10 if feature == UNIFIED_BATTERY_FEATURE else 0x00
+        report = feature_request(dev, slot, index, function)
+        if report is None:
+            continue
+        battery, charging = decode_battery_report(feature, report)
         if battery is not None:
             return battery, charging
-    return hidpp10_battery(dev, slot)
+    return None, None
+
+def generic_battery(dev, slot, protocol):
+    if protocol == 'hidpp20':
+        return hidpp20_battery(dev, slot)
+    if protocol == 'hidpp10':
+        return hidpp10_battery(dev, slot)
+    return None, None
+
+def pairing_exchange(dev, slot):
+    """One pairing-register read: ('reply', report), ('error', code) or
+    ('timeout', None). Like read_paired_info, an error does not echo the
+    sub-register and may answer another reader, so it ends the read only
+    once the node goes quiet, and a matching reply after it still wins."""
+    sub = PAIRING_INFO_DEVICE_1 + slot - 1
+    error = None
+    try:
+        flush_buffer(dev)
+        dev.write([0x10, RECEIVER_IDX, 0x83, REG_PAIRING_INFO, sub, 0x00, 0x00])
+        for _ in range(DISCOVERY_READS):
+            r = dev.read(64, timeout_ms=50)
+            if not r:
+                if error is not None:
+                    break
+                continue
+            if len(r) < 6 or r[1] != RECEIVER_IDX:
+                continue
+            if pairing_reply_wpid(r, sub) is not None:
+                return 'reply', r
+            if is_pairing_error(r):
+                error = r[5]
+    except Exception:
+        pass
+    return ('error', error) if error is not None else ('timeout', None)
+
+def read_pairing_for_discovery(dev, slot):
+    """The pairing report of `slot`, or None for an empty slot. The receiver
+    answers its own registers whether the device is awake or not, so silence
+    or a busy error is a lost exchange, not an empty slot: try again before
+    dropping a paired device from the manifest for a whole scan interval."""
+    for attempt in range(3):
+        outcome, value = pairing_exchange(dev, slot)
+        if outcome == 'reply':
+            return value
+        if outcome == 'error' and value != ERR_BUSY:
+            return None
+        if attempt < 2:
+            time.sleep(0.2)
+    return None
 
 def model_name(name, kind, wpid):
     name = name.strip()
@@ -981,18 +1143,18 @@ def discover_receiver_devices():
             dev = hid.device()
             try:
                 dev.open_path(path)
-                receiver_id = hashlib.blake2s(path, digest_size=4).hexdigest()
+                receiver_id = receiver_hash(path)
                 for slot in range(1, max_slots + 1):
-                    report = read_paired_info(dev, slot)
+                    report = read_pairing_for_discovery(dev, slot)
                     if not report:
                         continue
                     wpid = pairing_reply_wpid(report, PAIRING_INFO_DEVICE_1 + slot - 1)
                     kind = PAIRING_KIND.get(report[11] & 0x0f, 'other') if len(report) > 11 else 'other'
                     name = receiver_codename(dev, slot)
-                    feature_kind, feature_name = hidpp20_identity(dev, slot)
+                    protocol, feature_kind, feature_name = hidpp20_identity(dev, slot)
                     kind = feature_kind or kind
                     name = name or feature_name
-                    battery, charging = generic_battery(dev, slot)
+                    battery, charging = generic_battery(dev, slot, protocol)
                     devices.append({
                         'id': f'rx-{receiver_id}-{slot}', 'kind': kind,
                         'name': model_name(name, kind, wpid), 'wpid': wpid,
@@ -1074,89 +1236,166 @@ def scan_receivers():
     publish_discovered(devices)
     return devices
 
+# A rescan runs every DISCOVERY_INTERVAL seconds, and sooner when asked:
+# SIGUSR1 (sent by `logibar-hidpp-monitor --refresh`, the panel's click) or a
+# monitor thread publishing a change, so the receiver rows follow the same
+# wake, sleep and battery events the category files do. A short settle delay
+# lets the monitor finish its own exchange first and folds a burst of events
+# into one scan.
+scan_requested = threading.Event()
+RESCAN_SETTLE_SECONDS = 1.0
+PID_FILE = 'hidpp-monitor.pid'
+# `--refresh` returns on the next manifest write, which may end a scan that
+# was already running, so the wait covers one whole worst-case scan: two
+# full Unifying receivers of sleeping devices took about 24 s on the fake
+# bus. The panel's `timeout` sits 5 s above this.
+REFRESH_WAIT_SECONDS = 45.0
+
+def request_scan(*_):
+    scan_requested.set()
+
 def receiver_scan_loop():
     while running:
+        scan_requested.clear()
         try:
             scan_receivers()
         except Exception as error:
             print(f'logibar-hidpp-monitor: discovery failed: {error}', file=sys.stderr)
-        for _ in range(DISCOVERY_INTERVAL):
-            if not running:
-                return
-            time.sleep(1)
+        deadline = time.monotonic() + DISCOVERY_INTERVAL
+        while running and time.monotonic() < deadline:
+            if scan_requested.wait(1):
+                time.sleep(RESCAN_SETTLE_SECONDS)
+                break
 
-def refresh_source(pid, name, battery_feature, wired=False):
-    """Read one receiver or cable directly, independently of daemon cache."""
-    nodes = safe_enumerate(VID, pid)
-    if not nodes:
-        return None
-    path = nodes[0]['path'] if wired else receiver_path_for_device(pid, name, nodes)
-    if path is None:
-        return None
-    dev = hid.device()
+def read_small_file(path, limit):
+    """Bounded read of a regular file this user owns, or None. No symlink,
+    no FIFO: the open does not follow or block, and the type is checked on
+    the open descriptor."""
     try:
-        dev.open_path(path)
-        device_idx = 0xff if wired else 0x01
-        if not wired and pid in UNIFYING_WPID_BY_PID:
-            device_idx = find_paired_index(dev, UNIFYING_WPID_BY_PID[pid])
-            if device_idx is None:
-                return None
-        feat_idx = get_feature_index(dev, device_idx, battery_feature, swid=SWID_REFRESH)
-        if not feat_idx:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_size > limit):
             return None
-        battery, charging = query_battery(dev, device_idx, feat_idx, battery_feature,
-                                          swid=SWID_REFRESH)
-        if battery is None:
-            return None
-        return battery, charging
+        return os.read(fd, limit + 1)[:limit + 1]
+    except OSError:
+        return None
     finally:
-        close_quietly(dev)
+        os.close(fd)
 
-def refresh_once(names):
-    """Force a hardware query and publish fresh values for available devices."""
-    results = {}
-    for wireless_pid, wired_pid, name, waybar_signal, model in DEVICES:
-        if name not in names:
-            continue
-        feature = BATTERY_FEATURE_BY_RECEIVER.get(wireless_pid, UNIFIED_BATTERY_FEATURE)
-        reading = None
-        is_wired = False
+def process_start_time(pid):
+    """Field 22 of /proc/<pid>/stat (clock ticks after boot), or None. With
+    the pid it names one process: a reused pid has another start time."""
+    try:
+        with open(f'/proc/{pid}/stat', 'rb') as stat_file:
+            line = stat_file.read(4096)
+    except OSError:
+        return None
+    # The command name (field 2) may hold spaces and parentheses.
+    fields = line[line.rfind(b')') + 2:].split()
+    return fields[19].decode() if len(fields) > 19 and fields[19].isdigit() else None
+
+def is_monitor_argv(argv):
+    """`logibar-hidpp-monitor ...` or `python3 .../logibar-hidpp-monitor ...`
+    — not any program that has the file as an argument (an editor)."""
+    if not argv:
+        return False
+    if os.path.basename(argv[0]) == b'logibar-hidpp-monitor':
+        return True
+    if re.fullmatch(rb'python[0-9.]*', os.path.basename(argv[0])) is None:
+        return False
+    # Interpreter options (`python3 -I -u script`) come before the script.
+    script = next((arg for arg in argv[1:8] if not arg.startswith(b'-')), b'')
+    return os.path.basename(script) == b'logibar-hidpp-monitor'
+
+def running_daemon_pid():
+    """The pid in the daemon's pid file, if that process is still this
+    user's logibar-hidpp-monitor daemon; None otherwise. The file holds the
+    pid and its start time, so a pid the kernel gave to another process
+    never matches."""
+    raw = read_small_file(os.path.join(STATE_DIR, PID_FILE), 40)
+    match = re.fullmatch(rb'([0-9]{1,10}) ([0-9]{1,20})\n?', raw or b'')
+    if not match:
+        return None
+    pid = int(match[1])
+    if pid <= 1 or pid == os.getpid():
+        return None
+    try:
+        if os.stat(f'/proc/{pid}').st_uid != os.getuid():
+            return None
+        with open(f'/proc/{pid}/cmdline', 'rb') as cmdline:
+            argv = cmdline.read(4096).split(b'\0')
+    except OSError:
+        return None
+    if process_start_time(pid) != match[2].decode():
+        return None
+    if b'--refresh' in argv or not is_monitor_argv(argv):
+        return None
+    return pid
+
+def manifest_stamp():
+    try:
+        info = os.stat(os.path.join(STATE_DIR, DISCOVERY_MANIFEST), follow_symlinks=False)
+        return info.st_ino, info.st_mtime_ns
+    except OSError:
+        return None
+
+def refresh_via_daemon(wait=REFRESH_WAIT_SECONDS):
+    """Ask the running daemon for a rescan and wait, bounded, until it has
+    published a new manifest. The click path never touches the hardware
+    itself: a second scanner on the same receivers is exactly the cross-talk
+    the software ids exist to prevent, and a second writer of the category
+    files would leave the daemon's published cache describing a file that
+    is no longer on disk."""
+    pid = running_daemon_pid()
+    if pid is None:
+        print('logibar-hidpp-monitor: no running daemon to refresh', file=sys.stderr)
+        return 1
+    before = manifest_stamp()
+    try:
+        # The pidfd pins the process: checked again while it is held, the
+        # pid cannot pass to another process between the check and the
+        # signal.
+        pidfd = os.pidfd_open(pid)
         try:
-            if wired_pid is not None:
-                reading = refresh_source(wired_pid, name, feature, wired=True)
-                is_wired = reading is not None
-            if reading is None and wireless_pid is not None:
-                reading = refresh_source(wireless_pid, name, feature)
-        except Exception as error:
-            print(f"logibar-hidpp-monitor: refresh of {model} failed: {error}", file=sys.stderr)
-        if reading is not None:
-            current = results.get(name)
-            if current is None or reading[0] < current[0]:
-                results[name] = (*reading, model, waybar_signal, is_wired)
-    for name, (battery, charging, model, waybar_signal, is_wired) in results.items():
-        state = {'_source_id': ('refresh', name), '_model': model,
-                 'wired_connected': is_wired}
-        write_state(name, battery, True, charging, waybar_signal, state)
-    return 0 if results else 1
+            if running_daemon_pid() != pid:
+                raise ProcessLookupError(f'pid {pid} is no longer the daemon')
+            signal.pidfd_send_signal(pidfd, signal.SIGUSR1)
+        finally:
+            os.close(pidfd)
+    except OSError as error:
+        print(f'logibar-hidpp-monitor: refresh failed: {error}', file=sys.stderr)
+        return 1
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        if manifest_stamp() != before:
+            return 0
+        time.sleep(0.2)
+    print('logibar-hidpp-monitor: the daemon did not rescan in time', file=sys.stderr)
+    return 1
 
 def main():
     global running
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--refresh', action='store_true', help='query hardware once and exit')
-    parser.add_argument('--devices', default='keyboard,mouse', help='comma-separated devices to refresh')
+    parser.add_argument('--refresh', action='store_true',
+                        help='ask the running daemon to rescan the receivers, then exit')
     args = parser.parse_args()
     if args.refresh:
-        names = set(args.devices.split(',')) & {'keyboard', 'mouse', 'headset', 'other'}
-        if not names:
-            parser.error('--refresh requires at least one device kind')
-        discovered = scan_receivers()
-        legacy_result = refresh_once(names & {'keyboard', 'mouse'}) if names & {'keyboard', 'mouse'} else 1
-        return 0 if discovered or legacy_result == 0 else 1
+        return refresh_via_daemon()
 
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
+    # Installed before the pid file exists: SIGUSR1's default action ends the
+    # process, so a refresh must never find a pid that cannot handle it.
+    signal.signal(signal.SIGUSR1, request_scan)
     os.makedirs(STATE_DIR, exist_ok=True, mode=0o700)
+    pid_file = os.path.join(STATE_DIR, PID_FILE)
+    pid_line = f'{os.getpid()} {process_start_time(os.getpid())}\n'
+    atomic_state_write(pid_file, pid_line)
 
     threads = []
     scanner = threading.Thread(target=receiver_scan_loop, daemon=True)
@@ -1166,6 +1405,11 @@ def main():
 
     while running:
         time.sleep(1)
+    try:
+        if read_small_file(pid_file, 40) == pid_line.encode():
+            os.unlink(pid_file)
+    except OSError:
+        pass
     return 0
 
 if __name__ == "__main__":

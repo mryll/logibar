@@ -96,8 +96,13 @@ class FakePairedDevice:
                               0x50 if self.charging else 0x30]), None
             return None, None
         if len(cmd) >= 7 and cmd[0] == 0x10 and cmd[2] == 0x00:
+            if self.legacy_level is not None:
+                # A HID++ 1.0 device rejects the HID++ 2.0 ROOT request:
+                # error 0x8f echoing sub-id and request byte, code 0x01
+                # (invalid sub-id). That is how a host tells 1.0 from 2.0.
+                return bytes([0x10, cmd[1], 0x8f, 0x00, cmd[3], 0x01, 0x00]), None
             feature_id = cmd[4] << 8 | cmd[5]
-            index = 0 if self.legacy_level is not None else self.feature_index(feature_id)
+            index = self.feature_index(feature_id)
             return bytes([cmd[0], cmd[1], 0x00, cmd[3], index, 0x00, 0x00]), None
         if len(cmd) >= 4 and cmd[0] == 0x11 and cmd[2] == self.name_index:
             return self._name_feature_report(cmd)
@@ -144,6 +149,11 @@ class FakePairedDevice:
             return bytes([0x11, cmd[1], cmd[2], cmd[3],
                           self.battery, 0x00, status]), None
         if self.battery_feature == UNIFIED_BATTERY_FEATURE:
+            if function == 0x0:
+                # getCapabilities: supported levels critical|low|good (0x07)
+                # and the state-of-charge flag. A reader that takes this for
+                # a status report sees a 7 % battery.
+                return bytes([0x11, cmd[1], cmd[2], cmd[3], 0x07, 0x02, 0x00]), None
             if function != 0x1:  # getStatus
                 return None, f"unsupported UNIFIED_BATTERY function byte 0x{cmd[3]:02x}"
             status = 0x01 if self.charging else 0x00

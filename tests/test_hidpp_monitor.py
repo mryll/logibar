@@ -628,6 +628,59 @@ class StateAggregationTests(unittest.TestCase):
             monitor.source_states.clear()
             monitor.published_states.clear()
 
+    def test_a_cable_reading_wins_over_a_lower_wireless_one(self):
+        # The wireless mouse has its own receiver row; the cable mouse has
+        # only this file. Lowest-wins hid the cable mouse entirely.
+        original_state_dir = monitor.STATE_DIR
+        original_run = monitor.subprocess.run
+        monitor.source_states.clear()
+        monitor.published_states.clear()
+        monitor.subprocess.run = lambda *_args, **_kwargs: None
+
+        try:
+            with tempfile.TemporaryDirectory() as state_dir:
+                monitor.STATE_DIR = state_dir
+                wireless = {'_source_id': (0xC547, 0xC094)}
+                cable = {'_source_id': (0xC539, 0xC088), 'wired_connected': True,
+                         '_model': 'G Pro Wireless'}
+
+                monitor.write_state("mouse", 30, True, False, 10, wireless)
+                monitor.write_state("mouse", 80, True, False, 10, cable)
+                self.assertTrue((Path(state_dir) / "mouse").read_text()
+                                .startswith("80\n1\n0\nG Pro Wireless\nwired"))
+        finally:
+            monitor.STATE_DIR = original_state_dir
+            monitor.subprocess.run = original_run
+            monitor.source_states.clear()
+            monitor.published_states.clear()
+
+    def test_a_cable_only_line_names_the_receivers_of_its_family(self):
+        # The G502 X line has no receiver PID; its receiver is the c547.
+        original_state_dir = monitor.STATE_DIR
+        original_run = monitor.subprocess.run
+        original_enumerate = monitor.safe_enumerate
+        monitor.source_states.clear()
+        monitor.published_states.clear()
+        monitor.subprocess.run = lambda *_args, **_kwargs: None
+        monitor.safe_enumerate = lambda vid, pid: (
+            [{'path': b'/dev/c547'}] if pid == 0xC547 else [])
+
+        try:
+            with tempfile.TemporaryDirectory() as state_dir:
+                monitor.STATE_DIR = state_dir
+                cable = {'_source_id': (None, 0xC098), 'wired_connected': True,
+                         '_model': 'G502 X LIGHTSPEED'}
+                monitor.write_state("mouse", 80, True, False, 10, cable)
+                self.assertEqual(
+                    (Path(state_dir) / "mouse").read_text(),
+                    f"80\n1\n0\nG502 X LIGHTSPEED\nwired rx-{monitor.receiver_hash(b'/dev/c547')}")
+        finally:
+            monitor.STATE_DIR = original_state_dir
+            monitor.subprocess.run = original_run
+            monitor.safe_enumerate = original_enumerate
+            monitor.source_states.clear()
+            monitor.published_states.clear()
+
     def test_disconnecting_one_model_keeps_the_other_connected(self):
         original_state_dir = monitor.STATE_DIR
         original_run = monitor.subprocess.run
@@ -1186,7 +1239,7 @@ class BusIntegrationTests(unittest.TestCase):
             harness.wait_for_state("mouse", "41\n1\n0\nG502 X LIGHTSPEED")
             bus.plug(FakeNode(b"/dev/sl-wired", 0xC094, FakePairedDevice(
                 kind=0x03, battery=77, charging=True), device_idx=0xFF))
-            harness.wait_for_state("mouse", "77\n1\n1\nPRO X Superlight\nwired")
+            harness.wait_for_state("mouse", "77\n1\n1\nPRO X Superlight\nwired rx-15d2d89c")
             report = harness.stop()
             self.assertEqual(report["protocol_errors"], [])
 
@@ -1308,7 +1361,7 @@ class BusIntegrationTests(unittest.TestCase):
         ])
         with DaemonHarness(bus) as harness:
             harness.start_device(0xC54D, 0xC09B, "mouse", 10)
-            harness.wait_for_state("mouse", "77\n1\n1\n\nwired")
+            harness.wait_for_state("mouse", "77\n1\n1\n\nwired rx-5cde0fe3")
             bus.unplug(b"/dev/sl2-wired")
             harness.wait_for_state("mouse", "50\n1\n0\n")
             report = harness.stop()
@@ -1347,7 +1400,7 @@ class BusIntegrationTests(unittest.TestCase):
             while b"/dev/sl2" in bus.open_paths():
                 self.assertLess(time.monotonic(), deadline, "the receiver stayed open")
                 time.sleep(0.02)
-            self.assertEqual(harness.state_file("mouse").read_text(), "77\n1\n1\n\nwired")
+            self.assertEqual(harness.state_file("mouse").read_text(), "77\n1\n1\n\nwired rx-5cde0fe3")
             report = harness.stop()
             self.assertEqual(report["protocol_errors"], [])
 
@@ -1520,51 +1573,412 @@ class HeadsetStateFileTests(unittest.TestCase):
             self.assertRegex(mod.MODEL, r"^[A-Za-z0-9 ._()+/-]{1,48}$")
 
 
-class ForcedRefreshTests(unittest.TestCase):
-    def test_cable_refresh_marks_the_fallback_as_wired(self):
-        cable = FakePairedDevice(kind=0x03, battery=41, name="G502 X LIGHTSPEED")
-        bus = FakeHidBus([FakeNode(b"/dev/cable", 0xC098, cable, device_idx=0xFF)])
-        mod = load_monitor_module(bus)
-        mod.DEVICES = [mod.DEVICES[-1]]
-        mod.subprocess = types.SimpleNamespace(run=lambda *a, **k: None)
-        with tempfile.TemporaryDirectory() as tmp:
-            mod.STATE_DIR = tmp
-            self.assertEqual(mod.refresh_once({"mouse"}), 0)
-            self.assertEqual((Path(tmp) / "mouse").read_text(),
-                             "41\n1\n0\nG502 X LIGHTSPEED\nwired")
-        self.assertEqual(bus.protocol_errors, [])
+FAKE_DAEMON = """import os, signal, sys, time
+state_dir = sys.argv[1]
+def rescan(*_):
+    tmp = os.path.join(state_dir, 'manifest.tmp')
+    with open(tmp, 'w') as f:
+        f.write('logibar-receivers-v1\\n')
+    os.replace(tmp, os.path.join(state_dir, 'receiver-devices'))
+signal.signal(signal.SIGUSR1, rescan)
+open(os.path.join(state_dir, 'ready'), 'w').close()
+while True:
+    time.sleep(0.05)
+"""
 
-    def test_queries_both_receivers_and_rewrites_fresh_state(self):
-        keyboard = FakePairedDevice(kind=0x00, battery_feature=BATTERY_VOLTAGE_FEATURE,
-                                    voltage=3989)
-        mouse = FakePairedDevice(kind=0x03, battery_feature=BATTERY_STATUS_FEATURE,
-                                 battery=55, charging=True, wpid=0x4069,
-                                 pairing_slot=4)
-        bus = FakeHidBus([
-            FakeNode(b"/dev/keyboard", 0xC545, keyboard),
-            FakeNode(b"/dev/mouse", 0x4069, mouse),
-        ])
+
+def pid_line(mod, pid):
+    return f"{pid} {mod.process_start_time(pid)}\n"
+
+
+class ClickRefreshTests(unittest.TestCase):
+    """`--refresh` is what the panel runs on a click. It asks the daemon
+    for a rescan and never opens a hidraw node itself."""
+
+    def _module(self, tmp):
+        bus = FakeHidBus([])
         mod = load_monitor_module(bus)
-        mod.DEVICES = [mod.DEVICES[0], mod.DEVICES[2]]
-        mod.subprocess = types.SimpleNamespace(run=lambda *a, **k: None)
+        mod.STATE_DIR = tmp
+        return mod, bus
+
+    def _spawn_daemon(self, tmp, name="logibar-hidpp-monitor", extra=()):
+        script = Path(tmp) / name
+        script.write_text(FAKE_DAEMON)
+        proc = subprocess.Popen([sys.executable, str(script), tmp, *extra])
+        self.addCleanup(proc.wait, 5)
+        self.addCleanup(proc.kill)
+        deadline = time.monotonic() + 5
+        while not (Path(tmp) / 'ready').exists():
+            self.assertLess(time.monotonic(), deadline, "the fake daemon never started")
+            time.sleep(0.02)
+        return proc
+
+    def test_a_refresh_signals_the_daemon_and_returns_once_it_rescanned(self):
         with tempfile.TemporaryDirectory() as tmp:
-            mod.STATE_DIR = tmp
-            self.assertEqual(mod.refresh_once({"keyboard", "mouse"}), 0)
-            self.assertEqual((Path(tmp) / "keyboard").read_text(),
-                             "80\n1\n0\nG915 TKL")
-            self.assertEqual((Path(tmp) / "mouse").read_text(),
-                             "55\n1\n1\nMX Master 2S")
-            mouse.battery = 60
-            self.assertEqual(mod.refresh_once({"mouse"}), 0)
-            self.assertEqual((Path(tmp) / "mouse").read_text(),
-                             "60\n1\n1\nMX Master 2S")
-        requests = [entry[4] for entry in bus.log if entry[0] == "write"]
-        self.assertTrue(any(cmd[0] == 0x11 and cmd[3] == mod.SWID_REFRESH
-                            for cmd in requests))
-        self.assertEqual(bus.protocol_errors, [])
+            mod, bus = self._module(tmp)
+            proc = self._spawn_daemon(tmp)
+            (Path(tmp) / mod.PID_FILE).write_text(pid_line(mod, proc.pid))
+            self.assertEqual(mod.refresh_via_daemon(wait=5), 0)
+            self.assertEqual((Path(tmp) / 'receiver-devices').read_text(),
+                             'logibar-receivers-v1\n')
+            self.assertIsNone(proc.poll())
+        self.assertEqual(bus.log, [])
+
+    def test_a_refresh_with_no_daemon_fails_fast_without_touching_hardware(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mod, bus = self._module(tmp)
+            started = time.monotonic()
+            self.assertEqual(mod.refresh_via_daemon(wait=5), 1)
+            self.assertLess(time.monotonic() - started, 1)
+        self.assertEqual(bus.log, [])
+
+    def test_a_stale_pid_file_never_signals_an_unrelated_process(self):
+        # SIGUSR1's default action kills: a pid the kernel reused for another
+        # program must not receive it.
+        with tempfile.TemporaryDirectory() as tmp:
+            mod, _ = self._module(tmp)
+            other = self._spawn_daemon(tmp, name="some-other-program")
+            (Path(tmp) / mod.PID_FILE).write_text(pid_line(mod, other.pid))
+            self.assertEqual(mod.refresh_via_daemon(wait=1), 1)
+            time.sleep(0.2)
+            self.assertIsNone(other.poll())
+            self.assertFalse((Path(tmp) / 'receiver-devices').exists())
+
+    def test_a_pid_file_that_is_a_symlink_or_garbage_is_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mod, _ = self._module(tmp)
+            proc = self._spawn_daemon(tmp)
+            target = Path(tmp) / 'elsewhere'
+            target.write_text(pid_line(mod, proc.pid))
+            (Path(tmp) / mod.PID_FILE).symlink_to(target)
+            self.assertIsNone(mod.running_daemon_pid())
+            (Path(tmp) / mod.PID_FILE).unlink()
+            (Path(tmp) / mod.PID_FILE).write_text(f"{proc.pid} --refresh\n")
+            self.assertIsNone(mod.running_daemon_pid())
+            (Path(tmp) / mod.PID_FILE).write_text(pid_line(mod, 1))
+            self.assertIsNone(mod.running_daemon_pid())
+
+    def test_a_reused_pid_with_another_start_time_is_never_signalled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mod, _ = self._module(tmp)
+            proc = self._spawn_daemon(tmp)
+            start = int(mod.process_start_time(proc.pid))
+            (Path(tmp) / mod.PID_FILE).write_text(f"{proc.pid} {start + 1}\n")
+            self.assertIsNone(mod.running_daemon_pid())
+            (Path(tmp) / mod.PID_FILE).write_text(f"{proc.pid}\n")
+            self.assertIsNone(mod.running_daemon_pid(), "a pid with no start time")
+            (Path(tmp) / mod.PID_FILE).write_text(pid_line(mod, proc.pid))
+            self.assertEqual(mod.running_daemon_pid(), proc.pid)
+
+    def test_a_program_that_only_names_the_monitor_file_is_never_signalled(self):
+        # An editor open on the script has its path as argv[1].
+        with tempfile.TemporaryDirectory() as tmp:
+            mod, _ = self._module(tmp)
+            self.assertTrue(mod.is_monitor_argv([b"/usr/bin/python3", b"/usr/bin/logibar-hidpp-monitor", b""]))
+            self.assertTrue(mod.is_monitor_argv([b"/usr/bin/logibar-hidpp-monitor", b""]))
+            self.assertTrue(mod.is_monitor_argv([b"python3", b"-I", b"-u", b"/usr/bin/logibar-hidpp-monitor", b""]))
+            self.assertFalse(mod.is_monitor_argv([b"python3", b"-c", b"print(1)", b"logibar-hidpp-monitor"]))
+            self.assertFalse(mod.is_monitor_argv([b"nvim", b"/usr/bin/logibar-hidpp-monitor", b""]))
+            self.assertFalse(mod.is_monitor_argv([b"less", b"logibar-hidpp-monitor"]))
+
+    def test_a_pid_that_is_another_refresh_is_never_signalled(self):
+        # Another click's `--refresh` child has the daemon's name in argv but
+        # no SIGUSR1 handler: the signal would kill it.
+        with tempfile.TemporaryDirectory() as tmp:
+            mod, _ = self._module(tmp)
+            proc = self._spawn_daemon(tmp, extra=("--refresh",))
+            (Path(tmp) / mod.PID_FILE).write_text(pid_line(mod, proc.pid))
+            self.assertIsNone(mod.running_daemon_pid())
+            self.assertEqual(mod.refresh_via_daemon(wait=1), 1)
+            time.sleep(0.2)
+            self.assertIsNone(proc.poll())
+
+    def test_a_scan_request_runs_the_next_scan_without_waiting_the_interval(self):
+        mod, _ = self._module(tempfile.gettempdir())
+        mod.RESCAN_SETTLE_SECONDS = 0.05
+        scans = []
+        mod.scan_receivers = lambda: scans.append(time.monotonic())
+        loop = threading.Thread(target=mod.receiver_scan_loop, daemon=True)
+        loop.start()
+        try:
+            deadline = time.monotonic() + 3
+            while not scans:
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(0.02)
+            mod.request_scan()
+            while len(scans) < 2:
+                self.assertLess(time.monotonic(), deadline, "the requested scan never ran")
+                time.sleep(0.02)
+        finally:
+            mod.running = False
+            loop.join(3)
+        self.assertFalse(loop.is_alive())
+
+    def test_a_monitor_publishing_a_change_asks_for_a_rescan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mod, _ = self._module(tmp)
+            mod.subprocess = types.SimpleNamespace(run=lambda *a, **k: None,
+                                                   DEVNULL=subprocess.DEVNULL)
+            state = {'_source_id': (0xC54D, None), '_model': 'PRO X Superlight 2'}
+            mod.write_state("mouse", 70, True, False, 10, state)
+            self.assertTrue(mod.scan_requested.is_set())
+            mod.scan_requested.clear()
+            mod.write_state("mouse", 70, True, False, 10, state)
+            self.assertFalse(mod.scan_requested.is_set(), "an unchanged reading rescanned")
 
 
 class ReceiverDiscoveryTests(unittest.TestCase):
+    def _status_with(self, files):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "logibar"
+            state.mkdir()
+            for name, content in files.items():
+                (state / name).write_text(content)
+            env = os.environ.copy()
+            env['XDG_RUNTIME_DIR'] = tmp
+            done = subprocess.run([str(SCRIPT.parent / 'logibar-status'), '--json'],
+                                  env=env, text=True, capture_output=True, timeout=30)
+            self.assertEqual(done.returncode, 0)
+            return json.loads(done.stdout)
+
+    def test_a_live_cable_replaces_the_receiver_row_it_no_longer_answers_on(self):
+        # A mouse charging on its cable is still paired to the receiver, which
+        # cannot reach it: the cable reading must show, not a dimmed
+        # last-known value from the receiver.
+        now = int(time.time())
+        status = self._status_with({
+            "receiver-devices": "logibar-receivers-v1\nrx-0a0b0c0d-1\tmouse\n",
+            "rx-0a0b0c0d-1": f"88\n0\n0\nG Pro\n{now - 600}\n4079",
+            "mouse": "41\n1\n1\nG Pro Wireless\nwired rx-0a0b0c0d",
+        })
+        self.assertEqual([(d['id'], d['battery'], d['charging']) for d in status['devices']],
+                         [("mouse", 41, True)])
+
+    def test_a_live_cable_keeps_a_sleeping_device_on_another_receiver(self):
+        # A G Pro on its cable says nothing about an MX Master asleep on a
+        # Unifying receiver: its recent reading stays.
+        now = int(time.time())
+        status = self._status_with({
+            "receiver-devices": "logibar-receivers-v1\nrx-0a0b0c0d-1\tmouse\nrx-11223344-1\tmouse\n",
+            "rx-0a0b0c0d-1": f"88\n0\n0\nG Pro\n{now - 600}\n4079",
+            "rx-11223344-1": f"55\n0\n0\nMX Master 2S\n{now - 600}\n4069",
+            "mouse": "41\n1\n1\nG Pro Wireless\nwired rx-0a0b0c0d",
+        })
+        self.assertEqual(sorted((d['id'], d['state']) for d in status['devices']),
+                         [("mouse", "ok"), ("rx-11223344-1", "last_known")])
+
+    def test_a_cable_with_no_receiver_of_its_family_hides_no_row(self):
+        now = int(time.time())
+        status = self._status_with({
+            "receiver-devices": "logibar-receivers-v1\nrx-11223344-1\tmouse\n",
+            "rx-11223344-1": f"55\n0\n0\nMX Master 2S\n{now - 600}\n4069",
+            "mouse": "41\n1\n1\nG Pro Wireless\nwired",
+        })
+        self.assertEqual(sorted(d['id'] for d in status['devices']),
+                         ["mouse", "rx-11223344-1"])
+
+    def test_a_live_cable_keeps_another_device_of_its_kind_that_answers(self):
+        status = self._status_with({
+            "receiver-devices": "logibar-receivers-v1\nrx-0a0b0c0d-2\tmouse\n",
+            "rx-0a0b0c0d-2": f"60\n1\n0\nMX Master\n{int(time.time())}\n4041",
+            "mouse": "41\n1\n1\nG Pro Wireless\nwired",
+        })
+        self.assertEqual(sorted(d['id'] for d in status['devices']),
+                         ["mouse", "rx-0a0b0c0d-2"])
+
+    def test_a_wireless_category_reading_never_doubles_a_receiver_row(self):
+        status = self._status_with({
+            "receiver-devices": "logibar-receivers-v1\nrx-0a0b0c0d-1\tmouse\n",
+            "rx-0a0b0c0d-1": f"70\n1\n0\nPRO X 2\n{int(time.time())}\n40a9",
+            "mouse": "70\n1\n0\nPRO X Superlight 2",
+        })
+        self.assertEqual([d['id'] for d in status['devices']], ["rx-0a0b0c0d-1"])
+
+    def _late_reply_bus(self):
+        mouse = FakePairedDevice(kind=0x03, battery=70, wpid=0x40A9,
+                                 name="PRO X 2")
+        return FakeHidBus([FakeNode(b"/dev/sl2", 0xC54D, mouse)])
+
+    def test_a_late_battery_lookup_reply_is_never_taken_for_the_next_request(self):
+        # Live on a PRO X 2 at 70 %, discovery published 7: the reply to the
+        # 0x1004 lookup came after its 200 ms window, the 0x1000 lookup with
+        # the same software id adopted it, and function 0 on 0x1004 is
+        # getCapabilities, whose first byte (0x07) passed for a percentage.
+        bus = self._late_reply_bus()
+        mod = load_monitor_module(bus)
+        mod.RECEIVER_SLOTS = {0xC54D: 1}
+
+        def is_battery_lookup(cmd):
+            # ROOT getFeature for anything but the name feature.
+            return cmd[0] == 0x10 and cmd[2] == 0x00 and (cmd[4], cmd[5]) != (0x00, 0x05)
+
+        # Pen the first battery lookup's reply AND the next lookup's, then
+        # deliver them in send order: the late reply lands first, while the
+        # second request is the one waiting.
+        gate = bus.hold_responses(b"/dev/sl2", 2, is_battery_lookup)
+        with tempfile.TemporaryDirectory() as tmp:
+            mod.STATE_DIR = os.path.join(tmp, "logibar")
+            mod.HIDRAW_CLASS_DIR = os.path.join(tmp, "no-hidraw")
+            result = {}
+            scanner = threading.Thread(
+                target=lambda: result.setdefault('devices', mod.scan_receivers()))
+            scanner.start()
+            gate.wait_until_full(timeout=10)
+            gate.release()
+            scanner.join(20)
+            self.assertFalse(scanner.is_alive())
+            [device] = result['devices']
+            self.assertEqual(device['battery'], 70)
+            saved = (Path(mod.STATE_DIR) / device['id']).read_text().splitlines()
+            self.assertEqual(saved[:2], ["70", "1"])
+        self.assertEqual(bus.protocol_errors, [])
+
+    def test_a_reply_late_by_several_requests_finds_no_one_waiting(self):
+        # The rotation must outlast one device's whole exchange: with five
+        # ids, the sixth request (the 0x1004 lookup) reused the first one's
+        # id, took the late name-feature index for its own, and a 70 %
+        # battery came out as another number.
+        bus = self._late_reply_bus()
+        mod = load_monitor_module(bus)
+        mod.RECEIVER_SLOTS = {0xC54D: 1}
+        first = mod.DISCOVERY_SWIDS[0]
+
+        def is_lookup_with_first_id(cmd):
+            return cmd[0] == 0x10 and cmd[2] == 0x00 and cmd[3] == first
+
+        gate = bus.hold_responses(b"/dev/sl2", 2, is_lookup_with_first_id)
+        with tempfile.TemporaryDirectory() as tmp:
+            mod.STATE_DIR = os.path.join(tmp, "logibar")
+            mod.HIDRAW_CLASS_DIR = os.path.join(tmp, "no-hidraw")
+            result = {}
+            scanner = threading.Thread(
+                target=lambda: result.setdefault('devices', mod.scan_receivers()))
+            scanner.start()
+            deadline = time.monotonic() + 20
+            while scanner.is_alive() and not gate._full.is_set():
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(0.01)
+            # Full: a later request reused the first id, and the late reply
+            # lands while it waits. Not full: the late reply lands after the
+            # scan, when no one waits.
+            gate.release()
+            scanner.join(20)
+            self.assertFalse(scanner.is_alive())
+            [device] = result['devices']
+            self.assertEqual((device['name'], device['battery']), ("PRO X 2", 70))
+
+    def test_discovery_and_the_monitor_share_a_receiver_without_crossing_readings(self):
+        # The monitor thread keeps the receiver open and answers its own
+        # requests and events while discovery scans the same node: every
+        # reply reaches both descriptors.
+        bus = self._late_reply_bus()
+        with DaemonHarness(bus) as harness:
+            mod = harness.module
+            mod.RECEIVER_SLOTS = {0xC54D: 1}
+            mod.STATE_DIR = str(harness.state_file("logibar"))
+            os.makedirs(mod.STATE_DIR)
+            harness.start_wireless(0xC54D, "mouse", 10)
+            harness.wait_for_state("logibar/mouse", "70\n1\n0\n")
+            for battery in (70, 64, 58):
+                bus.emit_battery_event(b"/dev/sl2", battery=battery)
+                [device] = mod.scan_receivers()
+                self.assertEqual(device['battery'], battery)
+                self.assertEqual(device['name'], "PRO X 2")
+                harness.wait_for_state(
+                    "logibar/mouse", f"{battery}\n1\n0\n")
+            report = harness.stop()
+        self.assertEqual(report["errors"], [])
+        self.assertEqual(report["protocol_errors"], [])
+
+    def test_a_busy_pairing_read_does_not_drop_a_paired_device(self):
+        bus = self._late_reply_bus()
+        mod = load_monitor_module(bus)
+        mod.RECEIVER_SLOTS = {0xC54D: 1}
+        busy = bytes([0x10, 0xff, 0x8f, 0x83, 0xb5, 0x07, 0x00])
+        bus.intercept_next(b"/dev/sl2",
+                           lambda cmd: cmd[2] == 0x83 and cmd[4] == 0x20,
+                           lambda request, report: [busy])
+        with tempfile.TemporaryDirectory() as tmp:
+            mod.STATE_DIR = os.path.join(tmp, "logibar")
+            mod.HIDRAW_CLASS_DIR = os.path.join(tmp, "no-hidraw")
+            [device] = mod.scan_receivers()
+        self.assertEqual((device['name'], device['battery']), ("PRO X 2", 70))
+
+    def _scan_with_one_busy_reply(self, predicate):
+        bus = self._late_reply_bus()
+        mod = load_monitor_module(bus)
+        mod.RECEIVER_SLOTS = {0xC54D: 1}
+        mod.BUSY_RETRY_SECONDS = 0.01
+
+        def busy(request, report):
+            # HID++ 2.0 error from the device: 0xff, the request's feature
+            # index and function/software id, then ERR_BUSY (0x08).
+            return [bytes([0x11, request[1], 0xff, request[2], request[3], 0x08]
+                          + [0] * 14)]
+
+        bus.intercept_next(b"/dev/sl2", predicate, busy)
+        with tempfile.TemporaryDirectory() as tmp:
+            mod.STATE_DIR = os.path.join(tmp, "logibar")
+            mod.HIDRAW_CLASS_DIR = os.path.join(tmp, "no-hidraw")
+            [device] = mod.scan_receivers()
+        return device
+
+    def test_a_feature_index_in_the_register_range_is_never_used(self):
+        # A hostile device answers the 0x1004 lookup with index 0x82: the
+        # battery read would go out as 11 xx 82 ..., a long-register write.
+        bus = self._late_reply_bus()
+        mod = load_monitor_module(bus)
+        mod.RECEIVER_SLOTS = {0xC54D: 1}
+
+        def hostile(request, report):
+            reply = bytearray(report)
+            reply[4] = 0x82
+            return [bytes(reply)]
+
+        bus.intercept_next(
+            b"/dev/sl2",
+            lambda cmd: cmd[0] == 0x10 and cmd[2] == 0x00 and (cmd[4], cmd[5]) == (0x10, 0x04),
+            hostile)
+        with tempfile.TemporaryDirectory() as tmp:
+            mod.STATE_DIR = os.path.join(tmp, "logibar")
+            mod.HIDRAW_CLASS_DIR = os.path.join(tmp, "no-hidraw")
+            mod.scan_receivers()
+        sent = [entry[4] for entry in bus.log if entry[0] == "write"]
+        self.assertFalse([cmd for cmd in sent if len(cmd) > 2 and cmd[2] >= 0x80
+                          and cmd[2] not in (0x81, 0x83)],
+                         "a request went out with a register-write sub-id")
+
+    def test_a_busy_identity_lookup_is_tried_again(self):
+        device = self._scan_with_one_busy_reply(
+            lambda cmd: cmd[0] == 0x10 and cmd[2] == 0x00 and (cmd[4], cmd[5]) == (0x00, 0x05))
+        self.assertEqual((device['name'], device['battery']), ("PRO X 2", 70))
+
+    def test_a_busy_battery_read_is_tried_again(self):
+        device = self._scan_with_one_busy_reply(
+            # 0x1004 sits at index 0x06 on the fake device; getStatus is function 1.
+            lambda cmd: cmd[0] == 0x11 and cmd[2] == 0x06 and (cmd[3] & 0xf0) == 0x10)
+        self.assertEqual((device['name'], device['battery']), ("PRO X 2", 70))
+
+    def test_a_busy_hidpp10_percentage_read_is_tried_again(self):
+        # A busy receiver answers 0x8f/0x07; falling through to the 0x07
+        # level register gave a rougher number, or none when it was silent.
+        receiver = FakeReceiver({
+            1: FakePairedDevice(kind=0x00, battery=50, legacy_level=73,
+                                wpid=0x400F, pairing_slot=1, name="K750"),
+        })
+        bus = FakeHidBus([FakeNode(b"/dev/unifying", 0xC52B, receiver)])
+        mod = load_monitor_module(bus)
+        mod.RECEIVER_SLOTS = {0xC52B: 1}
+        mod.BUSY_RETRY_SECONDS = 0.01
+        bus.intercept_next(
+            b"/dev/unifying", lambda cmd: cmd[2] == 0x81 and cmd[3] == 0x0d,
+            lambda request, report: [bytes([0x10, request[1], 0x8f, 0x81, 0x0d, 0x07, 0x00])])
+        with tempfile.TemporaryDirectory() as tmp:
+            mod.STATE_DIR = os.path.join(tmp, "logibar")
+            mod.HIDRAW_CLASS_DIR = os.path.join(tmp, "no-hidraw")
+            [device] = mod.scan_receivers()
+        self.assertEqual((device['name'], device['battery']), ("K750", 73))
+
     def test_multiple_models_and_legacy_device_share_receiver(self):
         receiver = FakeReceiver({
             1: FakePairedDevice(kind=0x00, battery=50, legacy_level=73,

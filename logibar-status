@@ -267,7 +267,7 @@ $JSON_MODE && $WATCH && cli_error "--watch only makes sense in waybar mode"
 
 # --- Read state files into parallel arrays ---
 # Sets: BATTERY[id] CONNECTED[id] CHARGING[id] STATE[id] UPDATED[id] NAME[id]
-declare -A BATTERY CONNECTED CHARGING STATE UPDATED NAME DEVICE_KIND LAST_KNOWN LAST_SEEN SOURCE
+declare -A BATTERY CONNECTED CHARGING STATE UPDATED NAME DEVICE_KIND LAST_KNOWN LAST_SEEN SOURCE WIRED_RX
 LAST_KNOWN_SECONDS=$((24 * 60 * 60))
 DYNAMIC_REGISTRY=false
 kind_requested() {
@@ -306,12 +306,16 @@ read_one_device() {
     local id="$1" file battery connected charging model seen blob now epoch
     file="$STATE_DIR/$id"
     BATTERY[$id]=""; CONNECTED[$id]=0; CHARGING[$id]=0; STATE[$id]="disconnected"; UPDATED[$id]=""
-    LAST_KNOWN[$id]=""; LAST_SEEN[$id]=""; SOURCE[$id]=""
+    LAST_KNOWN[$id]=""; LAST_SEEN[$id]=""; SOURCE[$id]=""; WIRED_RX[$id]=""
     NAME[$id]="${DEVICE_NAME[$id]}"
     blob=$(read_bounded "$file" "$MAX_STATE_BYTES") || return
     battery=""; connected=""; charging=""; model=""; seen=""
     { IFS= read -r battery; IFS= read -r connected; IFS= read -r charging; IFS= read -r model; IFS= read -r seen; } <<< "$blob"
-    [[ "$id" != rx-* && "$seen" == "wired" ]] && SOURCE[$id]="wired"
+    # "wired", then the receivers of the cable device's family, if any.
+    if [[ "$id" != rx-* && "$seen" =~ ^wired((\ rx-[a-f0-9]{8}){0,8})$ ]]; then
+        SOURCE[$id]="wired"
+        WIRED_RX[$id]="${BASH_REMATCH[1]# }"
+    fi
     model=${model:0:64}
     is_plain_model "$model" && NAME[$id]="$model"
     UPDATED[$id]=$(date -Iseconds -d "@$(stat -c %Y "$file" 2>/dev/null || echo 0)" 2>/dev/null)
@@ -356,13 +360,37 @@ read_devices() {
                 found=true; break
             fi
         done
-        $found && continue
         read_one_device "$kind"
+        if $found; then
+            # The cable always wins. A device charging on its cable still has
+            # its pairing on the receiver, which no longer reaches it: that row
+            # would show a dimmed last-known value while the live cable
+            # reading stayed hidden. A live cable replaces the receiver rows
+            # of its kind that do not answer, on the receivers of its own
+            # family only; a row that answers, or a row on another receiver,
+            # is another device and stays.
+            [[ "${SOURCE[$kind]}" == "wired" && "${CONNECTED[$kind]}" == "1" ]] || continue
+            drop_silent_rows "$kind" "${WIRED_RX[$kind]}"
+            DEVICES+=("$kind")
+            continue
+        fi
         if [[ "$kind" != headset && "${SOURCE[$kind]}" != "wired" ]]; then
             continue
         fi
         [[ "${CONNECTED[$kind]}" == "1" ]] && DEVICES+=("$kind")
     done
+}
+
+drop_silent_rows() {  # drop_silent_rows KIND "RECEIVER..."
+    local id kept=()
+    for id in "${DEVICES[@]}"; do
+        if [[ "${DEVICE_KIND[$id]:-}" == "$1" && "${CONNECTED[$id]}" != "1" \
+              && " $2 " == *" ${id%-*} "* ]]; then
+            continue
+        fi
+        kept+=("$id")
+    done
+    DEVICES=("${kept[@]}")
 }
 
 # Sets: WORST ANY_CHARGING CONNECTED_COUNT AGG_STATE
@@ -708,7 +736,7 @@ emit_waybar() {
         lines+=(" $(tip_c "$FG" "  ${DEVICE_ICON[$id]}  ${NAME[$id]}")")
         # Parked: the bar length is not known until every other line exists.
         meter_pct+=("$_pct")
-        meter_color+=("$([[ "$_stale" == 1 ]] && echo "$DIM" || ramp_color "$_pct")")
+        if [[ "$_stale" == 1 ]]; then meter_color+=("$DIM"); else meter_color+=("$(ramp_color "$_pct")"); fi
         meter_label+=("${_pct}%")
         meter_stale+=("$_stale")
         lines+=("METER:$(( ${#meter_pct[@]} - 1 ))")

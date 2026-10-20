@@ -28,9 +28,9 @@ The same core drives both frontends, so a number reads the same on either one:
 
 ## Features
 
-- **One widget for all devices.** The Omarchy bar shows current readings and clearly marked recent last-known readings; one click opens the panel and queries the keyboard and mouse directly. The Waybar face shows the device that needs attention first.
-- **Receiver discovery.** The HID++ monitor reads pairing slots on supported Unifying and Lightspeed receivers. Multiple active keyboards or mice get separate rows.
-- **Fresh readings.** The existing device monitors listen for HID++ events. Receiver discovery runs at startup, every five minutes, and when the Omarchy widget is clicked.
+- **One widget for all devices.** The Omarchy bar shows each device's reading, with recent last-known readings dimmed. The Waybar face shows the device that needs attention first. One click or one hover shows the details of each device.
+- **Receiver discovery.** The HID++ monitor reads the pairing slots of Unifying and Lightspeed receivers. Each paired device gets its own row, so two mice show as two rows.
+- **Event-driven, with a slow rescan.** Two small daemons listen for HID++ events, and the bar refreshes when the hardware sends one. The receiver scan runs at startup, after each event, every five minutes, and when you click the Omarchy widget.
 - **A real gauge.** The meters go from red at empty, through amber, to green at full. The colors come from your theme.
 - **Two frontends, one brain.** `logibar-status` makes every decision. Waybar and the Omarchy plugin only draw the result.
 - **Theme-aware.** The colors come from the active Omarchy theme, or from a pywal cache, or from a built-in palette.
@@ -50,11 +50,11 @@ The same core drives both frontends, so a number reads the same on either one:
 | G502 X LIGHTSPEED | Mouse | `logibar-hidpp-monitor` |
 | PRO X 2 LIGHTSPEED | Headset | `logibar-headset-monitor` |
 
-The MX Master 2S support is specific to this fork. The upstream AUR package does not include it; install the monitor from this fork. Direct wired or Bluetooth devices, and other receiver families, may need additional protocol support. The section [Add a device](#add-a-device) gives the procedure.
+Devices on a Unifying or Lightspeed receiver need no table entry: the receiver scan below finds them. A cable or another receiver family needs a new entry in a table. The section [Add a device](#add-a-device) gives the procedure.
 
-Receiver discovery no longer needs a model table for devices paired to Unifying (`c52b`, `c532`) or supported Lightspeed (`c539`, `c545`, `c547`, `c54d`) receivers. It reads each pairing slot, asks the device for its name and battery through HID++ 2.0 (`0x1004`, `0x1000`, `0x1001`), and falls back to HID++ 1.0 battery registers (`0x0d`, `0x07`). A device that responded within the past 24 hours remains visible with a dimmed, explicitly **last-known** percentage when it stops replying; the charging icon disappears until a fresh reply confirms charging. The panel shows when that device was last seen. Never-seen pairings and readings older than 24 hours stay hidden, as do pairings absent from the latest receiver scan. A missing reply can mean sleep, power off, out of range, or an unsupported query, so the UI says **Not responding** rather than guessing. Legacy wired and headset state remains a fallback when the scan has no pairing of that kind. Bolt receivers use different pairing registers and are not covered by this discovery path.
+Receiver discovery no longer needs a model table for devices paired to Unifying (`c52b`, `c532`) or supported Lightspeed (`c539`, `c545`, `c547`, `c54d`) receivers. It reads each pairing slot, asks the device for its name and battery through HID++ 2.0 (`0x1004`, `0x1000`, `0x1001`), or through the HID++ 1.0 battery registers (`0x0d`, `0x07`) when the device speaks HID++ 1.0. A device that responded within the past 24 hours remains visible with a dimmed, explicitly **last-known** percentage when it stops replying; the charging icon disappears until a fresh reply confirms charging. The panel shows when that device was last seen. Never-seen pairings and readings older than 24 hours stay hidden, as do pairings absent from the latest receiver scan. A device paired in the slot of another one of the same model shows that device's last-known reading until it answers for the first time. A missing reply can mean sleep, power off, out of range, or an unsupported query, so the UI says **Not responding** rather than guessing. Legacy wired and headset state remains a fallback when the scan has no pairing of that kind. Bolt receivers use different pairing registers and are not covered by this discovery path.
 
-In the Omarchy plugin, clicking the bar widget or pressing `r` in its panel forces a fresh HID++ query. It also queries every five minutes. A loading glyph appears beside the bar readings while a query runs. The regular daemon remains event driven. The MX Master 2S can report only charge ranges while charging; a displayed 50% or 90% may be an estimate rather than an exact percentage.
+In the Omarchy plugin, clicking the bar widget or pressing `r` in its panel asks the running daemon to scan the receivers now (`logibar-hidpp-monitor --refresh`). The plugin itself never talks to the hardware. A loading glyph appears beside the bar readings until the scan ends. The click refresh needs a daemon from the same release as the plugin: `omarchy plugin update` does not update the package, so run `yay -S logibar` too. With an older daemon, or with the daemon stopped, the panel shows "Refresh needs a running, up-to-date logibar daemon" and does nothing. The default panel settings also need the package of the same release: an older `logibar-status` does not know the `other` kind. The MX Master 2S can report only charge ranges while charging; a displayed 50% or 90% may be an estimate rather than an exact percentage.
 
 ## Requirements
 
@@ -87,19 +87,14 @@ sudo udevadm control --reload-rules && sudo udevadm trigger --action=change --su
 
 ### Omarchy
 
-For this fork's MX Master 2S support on [Omarchy](https://omarchy.org), install the monitor from source and add the forked plugin:
+On [Omarchy](https://omarchy.org), the complete installation is two commands:
 
 ```bash
-git clone https://github.com/patch321/logibar.git
-cd logibar
-make install PREFIX="$HOME/.local"
-make install-systemd PREFIX="$HOME/.local"
-sudo make install-udev
-systemctl --user start logibar-hidpp-monitor.service
-omarchy plugin add https://github.com/patch321/logibar.git --enable
+yay -S logibar
+omarchy plugin add https://github.com/mryll/logibar.git --enable
 ```
 
-These commands install the scripts, monitor services, udev rule and bar widget. Refer to [Omarchy shell plugin](#omarchy-shell-plugin) for the panel and its settings. If `mryll.logibar` is already installed, remove that plugin before adding this fork; the plugin ID is the same.
+The first command installs the scripts, the udev rule and the two monitor services. The second command installs the bar widget and enables it. Refer to [Omarchy shell plugin](#omarchy-shell-plugin) for the panel and its settings.
 
 ### Arch Linux (AUR)
 
@@ -107,15 +102,15 @@ These commands install the scripts, monitor services, udev rule and bar widget. 
 yay -S logibar
 ```
 
-The package adds the udev rule and enables both services. This upstream AUR package does not include the MX Master 2S changes in this fork.
+The package adds the udev rule and enables both services.
 
 ### From source
 
 ```bash
-git clone https://github.com/patch321/logibar.git
+git clone https://github.com/mryll/logibar.git
 cd logibar
-make install PREFIX="$HOME/.local"
-make install-systemd PREFIX="$HOME/.local"
+make install PREFIX=~/.local
+make install-systemd
 sudo make install-udev
 ```
 
@@ -211,14 +206,14 @@ Install the plugin, then add it to your bar:
 From the marketplace, or from this repository directly:
 
 ```bash
-omarchy plugin add https://github.com/patch321/logibar.git --enable
+omarchy plugin add https://github.com/mryll/logibar.git --enable
 ```
 
 That clones the repository into `~/.config/omarchy/plugins/mryll.logibar` and
 validates the manifest before it is enabled. To remove it later:
 `omarchy plugin remove mryll.logibar`.
 
-The plugin runs `logibar-status` from your PATH and needs the battery daemons. To show the MX Master 2S, install the daemon from this fork as described above.
+The plugin runs `logibar-status` from your PATH and needs the battery daemons, so install those too — from the AUR (`yay -S logibar`) or with `make install-all PREFIX=~/.local`.
 
 For development, link the working copy instead of cloning a second one:
 
@@ -241,8 +236,9 @@ The command links this repository into `~/.config/omarchy/plugins/mryll.logibar`
 | `showKeyboard` | boolean | `true` | Includes the keyboard |
 | `showMouse` | boolean | `true` | Includes the mouse |
 | `showHeadset` | boolean | `true` | Includes the headset |
+| `showOther` | boolean | `true` | Includes paired devices of other kinds (a presenter, a numpad) |
 
-Mouse buttons: **left** opens the panel and refreshes, **middle** refreshes. The widget disappears when no device is responding or has a reading from the past 24 hours.
+Mouse buttons: **left** opens the panel and asks the daemon for a receiver scan, **middle** asks for the scan only. The widget disappears when no device is responding or has a reading from the past 24 hours.
 
 > [!TIP]
 > After you edit a file in `omarchy/`, run `omarchy restart shell`. A rescan of the plugins does not compile the QML again.

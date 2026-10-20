@@ -409,32 +409,51 @@ Panel {
     function refresh(): void { root.requestFullRefresh() }
   }
 
+  // A click, middle click, `r` or the IPC `refresh` asks the daemon for an
+  // immediate receiver rescan. `--refresh` only signals the running daemon
+  // and waits, bounded, for its new manifest — the shell never starts a
+  // second scanner on the receivers. `timeout` bounds the child even if it
+  // hangs, so `fullRefreshing` always comes back down; the rows themselves
+  // update through the directory watch. No output is read from it.
+  // The pid file gate covers a plugin newer than the installed package: an
+  // old daemon writes no pid file and ignores `--refresh`, so running it
+  // would start a second scanner on the receivers. Exit 3: no pid file, so
+  // the daemon is stopped or older than the plugin.
+  // 5 s above REFRESH_WAIT_SECONDS in logibar-hidpp-monitor: a kill here
+  // reports a failure for a scan that would still end in time.
+  readonly property int refreshTimeoutSeconds: 50
+  readonly property string staleDaemonError: "Refresh needs a running, up-to-date logibar daemon; showing last reading"
+
   function requestFullRefresh() {
     if (fullRefreshing) return
-    var enabled = enabledDevices
-    if (!enabled) return
-    var devs = enabled
     refreshError = ""
     fullRefreshing = true
-    forceProc.command = ["/bin/sh", "-c", 'exec "$0" "$@"',
-      "logibar-hidpp-monitor", "--refresh", "--devices", devs.join(",")]
+    // The directory the panel watches comes in as $1, so the gate checks
+    // the same pid file the daemon writes next to the state files.
+    forceProc.command = ["/bin/sh", "-c",
+      '[ -s "$1/hidpp-monitor.pid" ] || exit 3; shift; exec "$0" "$@"',
+      "timeout", stateDir, "-k", "2", String(refreshTimeoutSeconds),
+      "logibar-hidpp-monitor", "--refresh"]
     forceProc.running = true
   }
 
   Process {
     id: forceProc
-    onExited: function(code) {
+    property bool sawExit: false
+    onRunningChanged: {
+      if (running) { sawExit = false; return }
+      // A failed start emits no `exited`: settle here as well.
+      if (!sawExit) root.refreshError = "Device refresh failed; showing last reading"
       root.fullRefreshing = false
-      if (code !== 0) root.refreshError = "Device refresh failed; showing last reading"
+    }
+    onExited: function(code) {
+      sawExit = true
+      root.fullRefreshing = false
+      // Assigned either way: `runningChanged` may have settled first.
+      root.refreshError = code === 3 ? root.staleDaemonError
+        : code !== 0 ? "Device refresh failed; showing last reading" : ""
       root.refresh()
     }
-  }
-
-  Timer {
-    interval: 300000
-    running: true
-    repeat: true
-    onTriggered: root.requestFullRefresh()
   }
 
   function refresh() {
@@ -447,7 +466,10 @@ Panel {
       loadError = ""
       return
     }
-    startRun([binName, "--json", "--devices", devs.join(",")])
+    // Every kind enabled (the default) passes no filter: a CLI older than
+    // this plugin does not know "other" and rejects the whole list.
+    startRun(devs.length === 4 ? [binName, "--json"]
+                               : [binName, "--json", "--devices", devs.join(",")])
   }
 
   function startRun(cmd) {
