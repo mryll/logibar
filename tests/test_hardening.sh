@@ -429,6 +429,73 @@ check "the panel caps what it retains from the CLI" grep -q 'maxChars: 1024 \* 1
 check "the panel does not call its char tripwire a byte cap" \
     bash -c "! grep -qE 'maxBytes|KiB' '$PANEL'"
 
+# ── a click asks the daemon; the shell never scans the hardware ──────────────
+#
+# The click refresh runs a child from the shell process. It must be bounded in
+# time (a hung child left the refresh flag up and every later click dead) and
+# must only signal the daemon: a second scanner on the receivers crossed its
+# replies with the daemon's and published wrong batteries. A daemon older than
+# the plugin ignores `--refresh` and would become that second scanner, so the
+# click runs only when the new daemon's pid file exists.
+
+check "the click refresh is bounded by timeout" \
+    grep -qF '"timeout", stateDir, "-k", "2", String(refreshTimeoutSeconds)' "$PANEL"
+check "the click refresh only asks the daemon" \
+    grep -qF '"logibar-hidpp-monitor", "--refresh"]' "$PANEL"
+check "the click refresh runs only when the daemon wrote its pid file" \
+    grep -qF '[ -s "$1/hidpp-monitor.pid" ] || exit 3; shift; exec "$0" "$@"' "$PANEL"
+check "the pid file gate checks the directory the panel watches" \
+    grep -qF '"timeout", stateDir,' "$PANEL"
+check "the pid file the panel checks is the one the daemon writes" \
+    bash -c "grep -qF \"PID_FILE = 'hidpp-monitor.pid'\" '$REPO/logibar-hidpp-monitor' && grep -qF \"'logibar')\" '$REPO/logibar-hidpp-monitor'"
+check "the click refresh resets its flag on a failed start too" \
+    bash -c "sed 's;//.*;;' '$PANEL' | grep -A8 'id: forceProc' | grep -q 'onRunningChanged'"
+check "the default configuration passes no --devices (an older CLI rejects \"other\")" \
+    grep -qF 'devs.length === 4 ? [binName, "--json"]' "$PANEL"
+check "the panel does not poll the hardware on a timer" not_in_panel 'interval: 300000'
+check "--refresh signals the daemon instead of scanning" \
+    grep -q 'return refresh_via_daemon()' "$REPO/logibar-hidpp-monitor"
+
+# ── device data renders as plain text ─────────────────────────────────────────
+#
+# A device name comes from the device. QML Text defaults to AutoText, which
+# renders markup as soon as it sees a tag; the name filter is not the only
+# guard. Every Text whose text is not a string literal sets PlainText.
+
+text_without_plain() {  # prints FILE:LINE of each data-bearing Text without PlainText
+    python3 -I - "$@" <<'PY'
+import re, sys
+for path in sys.argv[1:]:
+    lines = open(path).read().split('\n')
+    for i, line in enumerate(lines):
+        if not re.search(r'\bText\s*\{', line):
+            continue
+        depth, block = 0, []
+        for tail in lines[i:]:
+            depth += tail.count('{') - tail.count('}')
+            block.append(tail)
+            if depth <= 0:
+                break
+        body = '\n'.join(block)
+        literal = re.search(r'^\s*text:\s*"[^"]*"\s*$', body, re.M)
+        if 'Text.PlainText' not in body and not literal:
+            print(f"{path}:{i + 1}")
+PY
+}
+_offenders=$(text_without_plain "$PANEL" "$REPO/omarchy/BarWidget.qml")
+check "every data-bearing Text in the plugin is PlainText" test -z "$_offenders"
+
+# ── the README installs from upstream only ───────────────────────────────────
+#
+# An external contribution once pointed every install command at its fork.
+# Any repository named logibar, any clone and any plugin add must be this one.
+
+README="$REPO/README.md"
+no_foreign_logibar() { ! grep -oE 'github\.com/[A-Za-z0-9_.-]+/logibar' "$README" | grep -qv '^github\.com/mryll/logibar$'; }
+no_foreign_install() { ! grep -E '(git clone|omarchy plugin add) ' "$README" | grep -qv 'https://github\.com/mryll/logibar\.git'; }
+check "the README names no logibar repository but mryll/logibar" no_foreign_logibar
+check "every clone and plugin add in the README is mryll/logibar" no_foreign_install
+
 # ── summary ──────────────────────────────────────────────────────────────────
 
 echo

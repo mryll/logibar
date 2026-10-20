@@ -14,7 +14,7 @@
 #   default     waybar JSON for a single combined module
 #   --json      structured document (schema_version 1): devices[] + aggregate
 #   --watch     stream waybar JSON, one line per state change (needs inotifywait)
-#   --devices   comma-separated subset of: keyboard,mouse,headset (default: all)
+#   --devices   comma-separated subset of: keyboard,mouse,headset,other (default: all)
 #   --tooltip-font FONT
 #               font family (or Pango family list) the tooltip is pinned to.
 #               Default: "JetBrainsMono Nerd Font Mono, JetBrainsMono Nerd
@@ -90,10 +90,10 @@ MAX_STATE_BYTES=$((64 * 1024))
 
 # Device registry — ids, Nerd Font identity glyphs, display names.
 DEVICE_IDS=(keyboard mouse headset)
-declare -A DEVICE_ICON=([keyboard]="󰌌" [mouse]="󰍽" [headset]="󰋎")
+declare -A DEVICE_ICON=([keyboard]="󰌌" [mouse]="󰍽" [headset]="󰋎" [other]="󰂯")
 # Generic names: the fallback when a state file has no model line (an older
 # daemon) or the line is not a plain model name.
-declare -A DEVICE_NAME=([keyboard]="G915 TKL" [mouse]="Logitech mouse" [headset]="PRO X 2 Headset")
+declare -A DEVICE_NAME=([keyboard]="G915 TKL" [mouse]="Logitech mouse" [headset]="PRO X 2 Headset" [other]="Logitech device")
 # The model is text somebody else writes: printable ASCII, 48 characters at
 # most, or the generic name stays.
 MODEL_RE='^[A-Za-z0-9 ._()+/-]{1,48}$'
@@ -185,6 +185,7 @@ WATCH=false
 PLAIN_SURFACES=""   # "" | all | bar | tooltip — which surfaces drop color
 _nc=""
 DEVICES=("${DEVICE_IDS[@]}")
+REQUESTED_ALL=true
 # --help / -h: the reference the user needs is already the header comment of
 # this file, so print that rather than a second copy that can drift from it.
 # The block runs from the "# Usage:" line to the first line that is not a
@@ -204,6 +205,7 @@ while [[ $# -gt 0 ]]; do
         --watch) WATCH=true; shift ;;
         --devices)
             [[ $# -ge 2 ]] || cli_error "--devices requires a value"
+            REQUESTED_ALL=false
             IFS=',' read -r -a DEVICES <<< "$2"
             for _d in "${DEVICES[@]}"; do
                 [[ -n "${DEVICE_ICON[$_d]}" ]] || cli_error "unknown device: $_d"
@@ -242,6 +244,7 @@ while [[ $# -gt 0 ]]; do
         *) cli_error "Unknown option: $1" ;;
     esac
 done
+REQUESTED_KINDS=("${DEVICES[@]}")
 
 # https://no-color.org — any non-empty NO_COLOR means monochrome everywhere,
 # but an explicit --no-color=... is the more specific instruction and wins
@@ -264,44 +267,130 @@ $JSON_MODE && $WATCH && cli_error "--watch only makes sense in waybar mode"
 
 # --- Read state files into parallel arrays ---
 # Sets: BATTERY[id] CONNECTED[id] CHARGING[id] STATE[id] UPDATED[id] NAME[id]
-declare -A BATTERY CONNECTED CHARGING STATE UPDATED NAME
+declare -A BATTERY CONNECTED CHARGING STATE UPDATED NAME DEVICE_KIND LAST_KNOWN LAST_SEEN SOURCE WIRED_RX
+LAST_KNOWN_SECONDS=$((24 * 60 * 60))
+DYNAMIC_REGISTRY=false
+kind_requested() {
+    local requested
+    $REQUESTED_ALL && return 0
+    for requested in "${REQUESTED_KINDS[@]}"; do
+        [[ "$requested" == "$1" ]] && return 0
+    done
+    return 1
+}
+
+load_dynamic_registry() {
+    DEVICES=("${REQUESTED_KINDS[@]}")
+    DYNAMIC_REGISTRY=false
+    local blob header id kind extra
+    blob=$(read_bounded "$STATE_DIR/receiver-devices" 4096) || return
+    IFS= read -r header <<< "$blob"
+    [[ "$header" == 'logibar-receivers-v1' ]] || return
+    DYNAMIC_REGISTRY=true
+    DEVICES=()
+    local -A seen=()
+    while IFS=$'\t' read -r id kind extra; do
+        [[ "$id" =~ ^rx-[a-f0-9]{8}-[1-6]$ ]] || continue
+        [[ "$kind" == keyboard || "$kind" == mouse || "$kind" == headset || "$kind" == other ]] || continue
+        [[ -z "$extra" && -z "${seen[$id]:-}" ]] || continue
+        kind_requested "$kind" || continue
+        seen[$id]=1
+        DEVICES+=("$id")
+        DEVICE_KIND[$id]="$kind"
+        DEVICE_ICON[$id]="${DEVICE_ICON[$kind]}"
+        DEVICE_NAME[$id]="${DEVICE_NAME[$kind]}"
+    done < <(printf '%s\n' "$blob" | tail -n +2)
+}
+
+read_one_device() {
+    local id="$1" file battery connected charging model seen blob now epoch
+    file="$STATE_DIR/$id"
+    BATTERY[$id]=""; CONNECTED[$id]=0; CHARGING[$id]=0; STATE[$id]="disconnected"; UPDATED[$id]=""
+    LAST_KNOWN[$id]=""; LAST_SEEN[$id]=""; SOURCE[$id]=""; WIRED_RX[$id]=""
+    NAME[$id]="${DEVICE_NAME[$id]}"
+    blob=$(read_bounded "$file" "$MAX_STATE_BYTES") || return
+    battery=""; connected=""; charging=""; model=""; seen=""
+    { IFS= read -r battery; IFS= read -r connected; IFS= read -r charging; IFS= read -r model; IFS= read -r seen; } <<< "$blob"
+    # "wired", then the receivers of the cable device's family, if any.
+    if [[ "$id" != rx-* && "$seen" =~ ^wired((\ rx-[a-f0-9]{8}){0,8})$ ]]; then
+        SOURCE[$id]="wired"
+        WIRED_RX[$id]="${BASH_REMATCH[1]# }"
+    fi
+    model=${model:0:64}
+    is_plain_model "$model" && NAME[$id]="$model"
+    UPDATED[$id]=$(date -Iseconds -d "@$(stat -c %Y "$file" 2>/dev/null || echo 0)" 2>/dev/null)
+    is_battery_digits "$battery" || return
+    battery=$(( 10#$battery ))
+    (( battery > 100 )) && battery=100
+    if [[ "$id" == rx-* && "$seen" =~ ^[0-9]{10,11}$ ]]; then
+        epoch=$(( 10#$seen ))
+        now=$(date +%s)
+        if (( epoch <= now && now - epoch <= LAST_KNOWN_SECONDS )); then
+            LAST_SEEN[$id]=$(date -Iseconds -d "@$epoch" 2>/dev/null)
+            if [[ "$connected" != "1" ]]; then
+                LAST_KNOWN[$id]="$battery"
+                STATE[$id]="last_known"
+            fi
+        fi
+    fi
+    [[ "$connected" == "1" ]] || return
+    BATTERY[$id]="$battery"
+    CONNECTED[$id]=1
+    [[ "$charging" == "1" ]] && CHARGING[$id]=1
+    if   (( battery <= CRITICAL_LEVEL )); then STATE[$id]="critical"
+    elif (( battery <= WARNING_LEVEL ));  then STATE[$id]="warning"
+    else STATE[$id]="ok"; fi
+}
+
 read_devices() {
-    local id file battery connected charging model blob
+    local id kind found
+    load_dynamic_registry
     for id in "${DEVICES[@]}"; do
-        file="$STATE_DIR/$id"
-        BATTERY[$id]=""; CONNECTED[$id]=0; CHARGING[$id]=0; STATE[$id]="disconnected"; UPDATED[$id]=""
-        NAME[$id]="${DEVICE_NAME[$id]}"
-        # One bounded read instead of three `sed -n Np`: it also collapses
-        # three opens of a file somebody else writes into one, so the state
-        # cannot change shape between the first line and the third.
-        blob=$(read_bounded "$file" "$MAX_STATE_BYTES") || continue
-        battery=""; connected=""; charging=""; model=""
-        { IFS= read -r battery; IFS= read -r connected; IFS= read -r charging; IFS= read -r model; } <<< "$blob"
-        # Fourth line: the model the daemon matched. The slice bounds the
-        # regex before it runs; anything that is not a plain name keeps the
-        # generic one.
-        model=${model:0:64}
-        is_plain_model "$model" && NAME[$id]="$model"
-        UPDATED[$id]=$(date -Iseconds -d "@$(stat -c %Y "$file" 2>/dev/null || echo 0)" 2>/dev/null)
-        # Read in base 10: a leading zero (08) is bad octal, which made the
-        # severity checks fail and fall through to "ok".
-        is_battery_digits "$battery" || continue
-        battery=$(( 10#$battery ))
-        # `connected` is the only connection flag. A battery of 0 with the
-        # device connected is a real reading (the G915 TKL reports voltage,
-        # and a drained cell converts to 0%) — hiding it would silence the
-        # alarm at the exact moment it matters most.
-        if [[ "$connected" != "1" ]]; then
+        read_one_device "$id"
+    done
+    $DYNAMIC_REGISTRY || return 0
+    # Preserve legacy wired/headset readings when this receiver scan has no
+    # pairing of that kind. A sleeping paired mouse must not be replaced by
+    # an older category reading that still says it is connected.
+    for kind in keyboard mouse headset; do
+        kind_requested "$kind" || continue
+        found=false
+        for id in "${DEVICES[@]}"; do
+            if [[ "${DEVICE_KIND[$id]:-}" == "$kind" ]]; then
+                found=true; break
+            fi
+        done
+        read_one_device "$kind"
+        if $found; then
+            # The cable always wins. A device charging on its cable still has
+            # its pairing on the receiver, which no longer reaches it: that row
+            # would show a dimmed last-known value while the live cable
+            # reading stayed hidden. A live cable replaces the receiver rows
+            # of its kind that do not answer, on the receivers of its own
+            # family only; a row that answers, or a row on another receiver,
+            # is another device and stays.
+            [[ "${SOURCE[$kind]}" == "wired" && "${CONNECTED[$kind]}" == "1" ]] || continue
+            drop_silent_rows "$kind" "${WIRED_RX[$kind]}"
+            DEVICES+=("$kind")
             continue
         fi
-        (( battery > 100 )) && battery=100
-        BATTERY[$id]="$battery"
-        CONNECTED[$id]=1
-        [[ "$charging" == "1" ]] && CHARGING[$id]=1
-        if   (( battery <= CRITICAL_LEVEL )); then STATE[$id]="critical"
-        elif (( battery <= WARNING_LEVEL ));  then STATE[$id]="warning"
-        else STATE[$id]="ok"; fi
+        if [[ "$kind" != headset && "${SOURCE[$kind]}" != "wired" ]]; then
+            continue
+        fi
+        [[ "${CONNECTED[$kind]}" == "1" ]] && DEVICES+=("$kind")
     done
+}
+
+drop_silent_rows() {  # drop_silent_rows KIND "RECEIVER..."
+    local id kept=()
+    for id in "${DEVICES[@]}"; do
+        if [[ "${DEVICE_KIND[$id]:-}" == "$1" && "${CONNECTED[$id]}" != "1" \
+              && " $2 " == *" ${id%-*} "* ]]; then
+            continue
+        fi
+        kept+=("$id")
+    done
+    DEVICES=("${kept[@]}")
 }
 
 # Sets: WORST ANY_CHARGING CONNECTED_COUNT AGG_STATE
@@ -328,12 +417,19 @@ emit_json() {
     for id in "${DEVICES[@]}"; do
         rows=$(jq -c \
             --arg id "$id" --arg name "${NAME[$id]}" --arg state "${STATE[$id]}" \
+            --arg kind "${DEVICE_KIND[$id]:-$id}" \
+            --argjson paired "$([[ "$id" == rx-* ]] && echo true || echo false)" \
             --arg battery "${BATTERY[$id]}" --arg updated "${UPDATED[$id]}" \
+            --arg last_known "${LAST_KNOWN[$id]}" --arg last_seen "${LAST_SEEN[$id]}" \
             --argjson connected "$([[ "${CONNECTED[$id]}" == "1" ]] && echo true || echo false)" \
             --argjson charging "$([[ "${CHARGING[$id]}" == "1" ]] && echo true || echo false)" \
             '. + [{id:$id, name:$name, battery:(if $battery == "" then null else ($battery|tonumber) end),
                    connected:$connected, charging:$charging, state:$state,
-                   updated_at:(if $updated == "" then null else $updated end)}]' <<< "$rows")
+                   updated_at:(if $updated == "" then null else $updated end)}
+                   + (if $paired then {kind:$kind, paired:true,
+                       last_known_battery:(if $last_known == "" then null else ($last_known|tonumber) end),
+                       last_seen_at:(if $last_seen == "" then null else $last_seen end)}
+                     else {} end)]' <<< "$rows")
     done
     # The palette travels with the data so every frontend paints the same
     # gauge: theme colors resolved here once, CLI --color-* overrides applied.
@@ -556,8 +652,8 @@ _init_grad() {  # _init_grad CELLS
     done
 }
 
-_make_bar() {  # _make_bar PCT CELLS
-    local p=$1 n=$2 filled k out="" rest
+_make_bar() {  # _make_bar PCT CELLS STALE(0|1)
+    local p=$1 n=$2 stale=${3:-0} filled k out="" rest
     filled=$(( p * n / 100 ))
     (( filled > n )) && filled=$n
     (( filled < 0 )) && filled=0
@@ -571,28 +667,42 @@ _make_bar() {  # _make_bar PCT CELLS
         return
     fi
     for (( k = 0; k < filled; k++ )); do
-        out+="<span foreground='${_grad_cells[k]}'>█</span>"
+        if [[ "$stale" == "1" ]]; then
+            out+="<span foreground='${DIM}'>█</span>"
+        else
+            out+="<span foreground='${_grad_cells[k]}'>█</span>"
+        fi
     done
     [[ -n "$rest" ]] && out+="<span foreground='${DIM}'>${rest}</span>"
     printf '%s' "$out"
 }
 
 emit_waybar() {
+    local shown_worst="$WORST" stale_only=0 id
     if (( CONNECTED_COUNT == 0 )); then
+        stale_only=1
+        for id in "${DEVICES[@]}"; do
+            [[ -n "${LAST_KNOWN[$id]:-}" ]] || continue
+            if [[ -z "$shown_worst" ]] || (( LAST_KNOWN[$id] < shown_worst )); then
+                shown_worst="${LAST_KNOWN[$id]}"
+            fi
+        done
+    fi
+    if [[ -z "$shown_worst" ]]; then
         echo '{"text": ""}'
         return
     fi
 
     local face_glyph class color pct_markup
-    face_glyph=$(battery_glyph "$WORST" "$ANY_CHARGING")
+    face_glyph=$(battery_glyph "$shown_worst" "$ANY_CHARGING")
     class="normal"
-    (( WORST <= WARNING_LEVEL ))  && class="warning"
-    (( WORST <= CRITICAL_LEVEL )) && class="critical"
-    color=$(ramp_color "$WORST")
+    (( shown_worst <= WARNING_LEVEL ))  && class="warning"
+    (( shown_worst <= CRITICAL_LEVEL )) && class="critical"
+    if (( stale_only )); then class="last-known"; color="$DIM"; else color=$(ramp_color "$shown_worst"); fi
     if [[ -n "$color" ]] && ! $BAR_PLAIN; then
-        pct_markup="<span size='small' foreground='${color}'>${WORST}%</span>"
+        pct_markup="<span size='small' foreground='${color}'>${shown_worst}%</span>"
     else
-        pct_markup="<span size='small'>${WORST}%</span>"
+        pct_markup="<span size='small'>${shown_worst}%</span>"
     fi
 
     # --- Tooltip: title + one BLOCK per connected device + muted freshness ---
@@ -603,29 +713,42 @@ emit_waybar() {
     # family whose tooltip had no bar at all — it printed one flat row per
     # device while its own Omarchy panel drew a real meter for each one, so the
     # two frontends of one product did not look like one product.
-    local lines=() id status _dev_hhmm _bglyph
-    local meter_pct=() meter_color=() meter_label=()
+    local lines=() id status _dev_hhmm _bglyph _pct _stale _seen_text
+    local meter_pct=() meter_color=() meter_label=() meter_stale=()
     lines+=(" $(tip_bc "$ACCENT" "${face_glyph}  Logitech")")
     lines+=("SEP")
     for id in "${DEVICES[@]}"; do
-        [[ "${CONNECTED[$id]}" == "1" ]] || continue
-        if [[ "${CHARGING[$id]}" == "1" ]]; then status="Charging"; else status="On battery"; fi
-        _bglyph=$(battery_glyph "${BATTERY[$id]}" "${CHARGING[$id]}")
+        _stale=0
+        if [[ "${CONNECTED[$id]}" == "1" ]]; then
+            _pct="${BATTERY[$id]}"
+            if [[ "${CHARGING[$id]}" == "1" ]]; then status="Charging"; else status="On battery"; fi
+            _dev_hhmm=$(date -d "${UPDATED[$id]}" +%H:%M 2>/dev/null)
+        elif [[ -n "${LAST_KNOWN[$id]:-}" ]]; then
+            _stale=1
+            _pct="${LAST_KNOWN[$id]}"
+            status="Last known · Not responding"
+            _dev_hhmm=$(date -d "${LAST_SEEN[$id]}" '+%b %-d %H:%M' 2>/dev/null)
+        else
+            continue
+        fi
+        _bglyph=$(battery_glyph "$_pct" "$([[ "$_stale" == 1 ]] && echo 0 || echo "${CHARGING[$id]}")")
         lines+=("")
         lines+=(" $(tip_c "$FG" "  ${DEVICE_ICON[$id]}  ${NAME[$id]}")")
         # Parked: the bar length is not known until every other line exists.
-        meter_pct+=("${BATTERY[$id]}")
-        meter_color+=("$(ramp_color "${BATTERY[$id]}")")
-        meter_label+=("${BATTERY[$id]}%")
+        meter_pct+=("$_pct")
+        if [[ "$_stale" == 1 ]]; then meter_color+=("$DIM"); else meter_color+=("$(ramp_color "$_pct")"); fi
+        meter_label+=("${_pct}%")
+        meter_stale+=("$_stale")
         lines+=("METER:$(( ${#meter_pct[@]} - 1 ))")
         # Freshness is PER DEVICE here, exactly as in the Omarchy panel: each
         # daemon writes its own device's reading at its own time, so one global
         # "Updated" would put the newest device's time next to every other
         # device's stale number. logibar is the family's documented exception to
         # the single-footer rule, and this is why.
-        _dev_hhmm=$(date -d "${UPDATED[$id]}" +%H:%M 2>/dev/null)
         if [[ -n "$_dev_hhmm" ]]; then
-            lines+=(" $(tip_c "$DIM" "  ${_bglyph}  ${status}  ·  Updated ${_dev_hhmm}")")
+            _seen_text="Updated"
+            [[ "$_stale" == 1 ]] && _seen_text="Seen"
+            lines+=(" $(tip_c "$DIM" "  ${_bglyph}  ${status}  ·  ${_seen_text} ${_dev_hhmm}")")
         else
             lines+=(" $(tip_c "$DIM" "  ${_bglyph}  ${status}")")
         fi
@@ -660,7 +783,7 @@ emit_waybar() {
     for _i in "${!lines[@]}"; do
         [[ "${lines[$_i]}" == METER:* ]] || continue
         _m=${lines[$_i]#METER:}
-        _mbar=$(_make_bar "${meter_pct[$_m]}" "$_barlen")
+        _mbar=$(_make_bar "${meter_pct[$_m]}" "$_barlen" "${meter_stale[$_m]}")
         _mlbl="${meter_label[$_m]}"
         # The gap absorbs the level's own width, so the LAST character of the
         # level lands on the right edge whatever the level says.
@@ -691,7 +814,9 @@ emit_waybar() {
     _tf=$(sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/'"'"'/\&apos;/g' <<< "$TOOLTIP_FONT")
     TIP="<span font_family='${_tf}'>${TIP}</span>"
 
-    jq -nc --arg t "$face_glyph ${pct_markup}" --arg tip "$TIP" --arg class "$class" --argjson pct "$WORST" \
+    local face_text="$face_glyph ${pct_markup}"
+    (( stale_only )) && face_text+=" 󰅐"
+    jq -nc --arg t "$face_text" --arg tip "$TIP" --arg class "$class" --argjson pct "$shown_worst" \
         '{text:$t, tooltip:$tip, class:$class, percentage:$pct}'
 }
 

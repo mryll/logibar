@@ -5,7 +5,7 @@
   "version": "0.6.1",
   "author": "mryll",
   "license": "MIT",
-  "description": "Combined battery status for Logitech Lightspeed devices (keyboard, mouse, headset) in the Omarchy bar.",
+  "description": "Combined battery status for supported Logitech Lightspeed and Unifying devices in the Omarchy bar.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Logitech Batteries",
-    "description": "Click: battery panel per device. Middle click: refresh. Requires logibar-status on PATH.",
+    "description": "Click: open panel and query devices. Middle click: query devices. Requires logibar-status on PATH.",
     "category": "Hardware",
     "allowMultiple": false,
     "defaultSection": "right",
@@ -22,6 +22,7 @@
       "showKeyboard": true,
       "showMouse": true,
       "showHeadset": true,
+      "showOther": true,
       "colorMode": "full"
     },
     "schema": [
@@ -42,14 +43,14 @@
         "key": "showKeyboard",
         "type": "boolean",
         "label": "Show keyboard",
-        "description": "Battery of the connected Logitech keyboard (G915 TKL, G915 X TKL). The panel names the model.",
+        "description": "Show responding keyboards and recent last-known battery readings. The panel names each model.",
         "defaultValue": true
       },
       {
         "key": "showMouse",
         "type": "boolean",
         "label": "Show mouse",
-        "description": "Battery of the connected Logitech mouse (G Pro Wireless, PRO X Superlight, PRO X Superlight 2, G502 X LIGHTSPEED). The panel names the model.",
+        "description": "Show responding mice and recent last-known battery readings. The panel names each model.",
         "defaultValue": true
       },
       {
@@ -57,6 +58,13 @@
         "type": "boolean",
         "label": "Show headset",
         "description": "Battery of the PRO X 2 LIGHTSPEED headset.",
+        "defaultValue": true
+      },
+      {
+        "key": "showOther",
+        "type": "boolean",
+        "label": "Show other devices",
+        "description": "Show responding devices of other kinds and their recent last-known battery readings.",
         "defaultValue": true
       }
     ]

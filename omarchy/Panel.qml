@@ -8,7 +8,7 @@ import qs.Ui
 
 // Logitech battery panel. Owns the `logibar-status --json` data (one source
 // of truth for thresholds and aggregation, shared with the waybar module) and
-// renders one section per connected device: identity glyph, name, an animated
+// renders one section per responding or recently seen device: identity glyph, name, an animated
 // battery meter, bold percent with a charging glyph, and a muted "updated"
 // time from the daemon's last state-file write.
 //
@@ -68,6 +68,7 @@ Panel {
     if (setting("showKeyboard", true) === true) list.push("keyboard")
     if (setting("showMouse", true) === true) list.push("mouse")
     if (setting("showHeadset", true) === true) list.push("headset")
+    if (setting("showOther", true) === true) list.push("other")
     return list
   }
 
@@ -84,15 +85,22 @@ Panel {
     var out = []
     for (var i = 0; i < status.devices.length; i++) {
       var d = status.devices[i]
-      if (d && d.connected === true && typeof d.battery === "number") out.push(d)
+      if (d && ((d.connected === true && typeof d.battery === "number")
+                || (d.state === "last_known" && typeof d.last_known_battery === "number"))) out.push(d)
     }
     return out
   }
   readonly property int connectedCount: aggregate ? (aggregate.connected_count || 0) : 0
+  readonly property int lastKnownCount: deviceRows.length - connectedCount
+
+  function isLastKnown(device) { return device && device.state === "last_known" }
+  function displayBattery(device) {
+    return isLastKnown(device) ? device.last_known_battery : device.battery
+  }
 
   // Identity glyphs (same Nerd Font icons as the waybar renderers) and the
   // stepped battery glyphs, decile-mapped like the first-party power widget.
-  readonly property var identityGlyphs: ({ keyboard: "󰌌", mouse: "󰍽", headset: "󰋎" })
+  readonly property var identityGlyphs: ({ keyboard: "󰌌", mouse: "󰍽", headset: "󰋎", other: "󰂯" })
   readonly property var levelGlyphs: ["󰁺", "󰁻", "󰁼", "󰁽", "󰁾", "󰁿", "󰂀", "󰂁", "󰂂", "󰁹"]
   readonly property var chargingGlyphs: ["󰢜", "󰂆", "󰂇", "󰂈", "󰢝", "󰂉", "󰢞", "󰂊", "󰂋", "󰂅"]
 
@@ -278,14 +286,31 @@ Panel {
   // there has never been data — an error must not look like "disconnected".
   readonly property string faceGlyph: {
     if (!hasData) return loadError !== "" ? "⚠" : ""
-    if (!aggregate || connectedCount === 0 || aggregate.worst_battery === null) return ""
-    return batteryGlyph(aggregate.worst_battery, aggregate.any_charging === true)
+    if (aggregate && connectedCount > 0 && aggregate.worst_battery !== null)
+      return batteryGlyph(aggregate.worst_battery, aggregate.any_charging === true)
+    if (deviceRows.length === 0) return ""
+    var worst = 100
+    for (var i = 0; i < deviceRows.length; i++)
+      worst = Math.min(worst, displayBattery(deviceRows[i]))
+    return batteryGlyph(worst, false)
   }
 
+  readonly property var faceEntries: {
+    var parts = []
+    for (var i = 0; i < deviceRows.length; i++) {
+      var d = deviceRows[i]
+      var stale = isLastKnown(d)
+      parts.push({text: (identityGlyphs[d.kind || d.id] || identityGlyphs.other)
+        + " " + displayBattery(d) + "%" + (stale ? " 󰅐" : (d.charging === true ? " 󰂅" : "")),
+        battery: displayBattery(d), lastKnown: stale})
+    }
+    return parts
+  }
   readonly property string faceLabel: {
-    if (vertical || !hasData || !aggregate || connectedCount === 0) return ""
-    if (aggregate.worst_battery === null) return ""
-    return aggregate.worst_battery + "%"
+    if (vertical || !hasData) return ""
+    var parts = []
+    for (var i = 0; i < faceEntries.length; i++) parts.push(faceEntries[i].text)
+    return parts.join("  ") + (fullRefreshing ? " 󰑐" : "")
   }
 
   // Glyph and number share this one color, so the bar element reads as a
@@ -306,9 +331,14 @@ Panel {
     var lines = []
     for (var i = 0; i < deviceRows.length; i++) {
       var d = deviceRows[i]
-      lines.push((identityGlyphs[d.id] || "") + " " + d.battery + "%"
+      if (isLastKnown(d))
+        lines.push(d.name + ": " + d.last_known_battery + "% last known · Not responding"
+          + (d.last_seen_at ? " · Last seen " + lastSeenText(d.last_seen_at) : ""))
+      else lines.push(d.name + ": " + d.battery + "%"
         + (d.charging === true ? " · Charging" : ""))
     }
+    if (fullRefreshing) lines.push("Refreshing device readings…")
+    else if (refreshError !== "") lines.push(refreshError)
     return lines.join("\n")
   }
 
@@ -319,6 +349,12 @@ Panel {
     var t = new Date(String(iso))
     if (isNaN(t.getTime())) return ""
     return Qt.formatTime(t, "HH:mm")
+  }
+
+  function lastSeenText(iso) {
+    if (!iso) return ""
+    var t = new Date(String(iso))
+    return isNaN(t.getTime()) ? "" : Qt.formatDateTime(t, "MMM d HH:mm")
   }
 
   // ---------------------------------------------------------------- process
@@ -350,6 +386,8 @@ Panel {
 
   // The copy button shows a check for a moment.
   property bool installCopied: false
+  property bool fullRefreshing: false
+  property string refreshError: ""
   Timer {
     id: copiedReset
     interval: 1500
@@ -368,7 +406,54 @@ Panel {
     function show(): void { root.open() }
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
-    function refresh(): void { root.refresh() }
+    function refresh(): void { root.requestFullRefresh() }
+  }
+
+  // A click, middle click, `r` or the IPC `refresh` asks the daemon for an
+  // immediate receiver rescan. `--refresh` only signals the running daemon
+  // and waits, bounded, for its new manifest — the shell never starts a
+  // second scanner on the receivers. `timeout` bounds the child even if it
+  // hangs, so `fullRefreshing` always comes back down; the rows themselves
+  // update through the directory watch. No output is read from it.
+  // The pid file gate covers a plugin newer than the installed package: an
+  // old daemon writes no pid file and ignores `--refresh`, so running it
+  // would start a second scanner on the receivers. Exit 3: no pid file, so
+  // the daemon is stopped or older than the plugin.
+  // 5 s above REFRESH_WAIT_SECONDS in logibar-hidpp-monitor: a kill here
+  // reports a failure for a scan that would still end in time.
+  readonly property int refreshTimeoutSeconds: 50
+  readonly property string staleDaemonError: "Refresh needs a running, up-to-date logibar daemon; showing last reading"
+
+  function requestFullRefresh() {
+    if (fullRefreshing) return
+    refreshError = ""
+    fullRefreshing = true
+    // The directory the panel watches comes in as $1, so the gate checks
+    // the same pid file the daemon writes next to the state files.
+    forceProc.command = ["/bin/sh", "-c",
+      '[ -s "$1/hidpp-monitor.pid" ] || exit 3; shift; exec "$0" "$@"',
+      "timeout", stateDir, "-k", "2", String(refreshTimeoutSeconds),
+      "logibar-hidpp-monitor", "--refresh"]
+    forceProc.running = true
+  }
+
+  Process {
+    id: forceProc
+    property bool sawExit: false
+    onRunningChanged: {
+      if (running) { sawExit = false; return }
+      // A failed start emits no `exited`: settle here as well.
+      if (!sawExit) root.refreshError = "Device refresh failed; showing last reading"
+      root.fullRefreshing = false
+    }
+    onExited: function(code) {
+      sawExit = true
+      root.fullRefreshing = false
+      // Assigned either way: `runningChanged` may have settled first.
+      root.refreshError = code === 3 ? root.staleDaemonError
+        : code !== 0 ? "Device refresh failed; showing last reading" : ""
+      root.refresh()
+    }
   }
 
   function refresh() {
@@ -381,7 +466,10 @@ Panel {
       loadError = ""
       return
     }
-    startRun([binName, "--json", "--devices", devs.join(",")])
+    // Every kind enabled (the default) passes no filter: a CLI older than
+    // this plugin does not know "other" and rejects the whole list.
+    startRun(devs.length === 4 ? [binName, "--json"]
+                               : [binName, "--json", "--devices", devs.join(",")])
   }
 
   function startRun(cmd) {
@@ -611,10 +699,10 @@ Panel {
           panelFlick.contentY = root.clamp(panelFlick.contentY + dy * Style.space(56), 0,
                                            Math.max(0, panelFlick.contentHeight - panelFlick.height))
       }
-      onActivateRequested: root.refresh()
+      onActivateRequested: root.requestFullRefresh()
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
-      onTextKey: function(t) { if (t === "r" || t === "R") root.refresh() }
+      onTextKey: function(t) { if (t === "r" || t === "R") root.requestFullRefresh() }
 
       Flickable {
         id: panelFlick
@@ -635,9 +723,10 @@ Panel {
           PanelHero {
             width: parent.width
             title: "Logitech"
-            meta: root.connectedCount > 0
-              ? root.connectedCount + (root.connectedCount === 1 ? " device" : " devices")
-              : ""
+            meta: root.lastKnownCount > 0
+              ? root.connectedCount + " active · " + root.lastKnownCount + " last known"
+              : (root.connectedCount > 0
+                ? root.connectedCount + (root.connectedCount === 1 ? " device" : " devices") : "")
             foreground: root.foreground
             fontFamily: root.fontFamily
 
@@ -744,8 +833,9 @@ Panel {
     id: section
     property var device: null
 
-    readonly property int pct: device ? Math.round(Number(device.battery || 0)) : 0
-    readonly property bool charging: device ? device.charging === true : false
+    readonly property int pct: device ? Math.round(Number(root.displayBattery(device) || 0)) : 0
+    readonly property bool lastKnown: root.isLastKnown(device)
+    readonly property bool charging: device && !lastKnown ? device.charging === true : false
 
     // What the meter is painting this frame, rounded exactly like the target
     // so the last frame of a sweep lands on the real figure with no jump.
@@ -763,7 +853,7 @@ Panel {
     //
     // The meter underneath is unaffected: its red origin is a position on a
     // fixed scale, not a claim about this device, so it stays pinned as built.
-    readonly property color rampTint: root.panelRamp(pct)
+    readonly property color rampTint: lastKnown ? root.dim : root.panelRamp(pct)
 
     spacing: Style.space(5)
 
@@ -781,9 +871,9 @@ Panel {
 
         Text {
           id: identityGlyph
-          text: section.device ? (root.identityGlyphs[section.device.id] || "") : ""
+          text: section.device ? (root.identityGlyphs[section.device.kind || section.device.id] || root.identityGlyphs.other) : ""
           textFormat: Text.PlainText
-          color: root.foreground
+          color: section.lastKnown ? root.dim : root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.icon
           verticalAlignment: Text.AlignVCenter
@@ -792,7 +882,7 @@ Panel {
         Text {
           text: section.device ? String(section.device.name || section.device.id) : ""
           textFormat: Text.PlainText
-          color: root.foreground
+          color: section.lastKnown ? root.dim : root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
           // A Row does not bound its children, so `elide` alone does nothing:
@@ -822,6 +912,7 @@ Panel {
       id: meter
       width: parent.width
       value: section.pct / 100
+      opacity: section.lastKnown ? 0.45 : 1
     }
 
     Item {
@@ -830,7 +921,8 @@ Panel {
 
       Text {
         id: statusLabel
-        text: section.charging ? "Charging" : "On battery"
+        text: section.lastKnown ? "Last known"
+          : (section.charging ? "Charging" : "On battery")
         textFormat: Text.PlainText
         color: section.charging ? root.mix(root.dim, root.foreground, 0.6) : root.dim
         font.family: root.fontFamily
@@ -845,6 +937,10 @@ Panel {
         // but the line is written in the same house shape the other widgets
         // use in theirs: clock glyph, "Updated HH:MM".
         text: {
+          if (section.lastKnown) {
+            var seen = root.lastSeenText(section.device ? section.device.last_seen_at : "")
+            return seen !== "" ? "󰅐  Seen " + seen : ""
+          }
           var at = root.updatedText(section.device ? section.device.updated_at : "")
           return at !== "" ? "󰅐  Updated " + at : ""
         }
