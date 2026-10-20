@@ -39,20 +39,21 @@ The same core drives both frontends, so a number reads the same on either one:
 
 ## Supported devices
 
-| Device | Type | Daemon |
+| Devices | Type | Daemon |
 |---|---|---|
-| MX Master 2S (Unifying) | Mouse | `logibar-hidpp-monitor` |
-| G915 TKL | Keyboard | `logibar-hidpp-monitor` |
-| G915 X TKL | Keyboard | `logibar-hidpp-monitor` |
-| G Pro Wireless | Mouse | `logibar-hidpp-monitor` |
-| PRO X Superlight | Mouse | `logibar-hidpp-monitor` |
-| PRO X Superlight 2 | Mouse | `logibar-hidpp-monitor` |
-| G502 X LIGHTSPEED | Mouse | `logibar-hidpp-monitor` |
+| Any device paired to a Unifying (`c52b`, `c532`) or Lightspeed (`c539`, `c545`, `c547`, `c54d`) receiver | Keyboard, mouse, other | `logibar-hidpp-monitor` |
+| Any HID++ 2.0 keyboard or mouse on its USB cable | Keyboard, mouse | `logibar-hidpp-monitor` |
 | PRO X 2 LIGHTSPEED | Headset | `logibar-headset-monitor` |
 
-Devices on a Unifying or Lightspeed receiver need no table entry: the receiver scan below finds them. A cable or another receiver family needs a new entry in a table. The section [Add a device](#add-a-device) gives the procedure.
+Seen on hardware: MX Master 2S, M720 Triathlon, G915 TKL, G915 X TKL, G Pro Wireless, PRO X Superlight, PRO X 2 (PRO X Superlight 2), G502 X LIGHTSPEED.
+
+No keyboard or mouse needs a table entry: the receiver scan below finds the paired devices, and the daemon finds a device on its cable (see [Devices on a cable](#devices-on-a-cable)). Each device gives its own name. Another receiver family needs its product ID in a table; the section [Add a device](#add-a-device) gives the procedure.
 
 Receiver discovery no longer needs a model table for devices paired to Unifying (`c52b`, `c532`) or supported Lightspeed (`c539`, `c545`, `c547`, `c54d`) receivers. It reads each pairing slot, asks the device for its name and battery through HID++ 2.0 (`0x1004`, `0x1000`, `0x1001`), or through the HID++ 1.0 battery registers (`0x0d`, `0x07`) when the device speaks HID++ 1.0. A device that stops replying disappears, like a device that is off: the receiver cannot tell a sleeping device from one that is off, so a mouse that stays still for some minutes also disappears until it answers again. With `--last-known` (Omarchy setting `showLastKnown`), a device that responded within the past 24 hours remains visible instead, with a dimmed, explicitly **last-known** percentage; the charging icon disappears until a fresh reply confirms charging, and the panel shows when that device was last seen. Never-seen pairings and readings older than 24 hours stay hidden, as do pairings absent from the latest receiver scan. A device paired in the slot of another one of the same model shows that device's last-known reading until it answers for the first time. A missing reply can mean sleep, power off, out of range, or an unsupported query, so the UI says **Not responding** rather than guessing. Legacy wired and headset state remains a fallback when the scan has no pairing of that kind. Bolt receivers use different pairing registers and are not covered by this discovery path.
+
+### Devices on a cable
+
+A device on its USB cable has its own HID node. The daemon looks at each Logitech USB node that is not a receiver and is not the node of a device paired to a receiver (the kernel puts that node under its receiver). It asks the device at index `0xff` for its kind and name (DEVICE_NAME, `0x0005`) and for a battery feature (`0x1004`, `0x1000` or `0x1001`). A keyboard or a mouse that answers gets a monitor, and its reading has the name that the device gives, the same name as through the receiver. The device also gives its model ID (DEVICE_INFO, `0x0003`), which contains the wireless PID of the device. That PID finds the device's row on its receiver: while the cable is connected, the CLI hides that row when it does not answer, and only that row. A node that does not answer is probed again only when the set of HID nodes changes. A device on Bluetooth is not a cable device.
 
 In the Omarchy plugin, clicking the bar widget or pressing `r` in its panel asks the running daemon to scan the receivers now (`logibar-hidpp-monitor --refresh`). The plugin itself never talks to the hardware. The scan shows nothing while it runs. The click refresh needs a daemon from the same release as the plugin: `omarchy plugin update` does not update the package, so run `yay -S logibar` too. With an older daemon, or with the daemon stopped, the bar tooltip shows "Refresh needs a running, up-to-date logibar daemon" and the click does nothing else. The default panel settings also need the package of the same release: an older `logibar-status` does not know the `other` kind. The MX Master 2S can report only charge ranges while charging; a displayed 50% or 90% may be an estimate rather than an exact percentage.
 
@@ -422,15 +423,15 @@ An error is also a JSON document, with an `error` field and the same exit code 0
 ```
 
 1. The **daemons** run as systemd user services and monitor the HID devices.
-2. The daemon writes each change to a **state file** in `$XDG_RUNTIME_DIR/logibar/`, in 4 lines: `battery`, `connected`, `charging`, `model`. A live cable reading adds `wired` as a fifth line, so it remains visible if no receiver pairing is found without reviving an old wireless category reading. Receiver-discovered entries instead add `last_success_epoch` and the paired device's wireless PID, so a sleeping device can retain a bounded last-known reading without inheriting another device's battery when a slot is reused. A seventh line `connecting` means that the link came up and the reading is on its way; the CLI honors it for 30 seconds only. Each write is atomic. A 3-line file from an older daemon is still valid; the widgets then show a generic name.
-3. **`logibar-status`** reads these files. It selects the worst device, applies the thresholds, finds the colors, and prints the result. The `model` line becomes the device name in the tooltip, in the JSON (`devices[].name`) and in the Omarchy panel. The widgets accept a model only as ASCII letters, digits, space and `._()+/-`, 1 to 48 characters; any other line (accents, markup, control bytes, a longer name) keeps the generic name, so a file that the widget does not write cannot put markup into the tooltip. A NUL byte is dropped by the shell before the check. The name is the table entry for the receiver that answered. Several mice use the LIGHTSPEED receivers `c539` and `c547`. Thus, the daemon also reads the wireless PID of the paired device from the receiver. If `MODEL_BY_WPID` has that PID for the same device type, the daemon shows the name from `MODEL_BY_WPID`. If not, a mouse shows the name of the entry that matched its receiver. A future change can read the name from the device through HID++ DEVICE_NAME (`0x0005`). That change removes this limit.
+2. The daemon writes each change to a **state file** in `$XDG_RUNTIME_DIR/logibar/`, in 4 lines: `battery`, `connected`, `charging`, `model`. A live cable reading adds `wired` and the receivers that have a row for that device as a fifth line; the CLI reads it from `wired-<kind>`. Receiver-discovered entries instead add `last_success_epoch` and the paired device's wireless PID, so a sleeping device can retain a bounded last-known reading without inheriting another device's battery when a slot is reused. A seventh line `connecting` means that the link came up and the reading is on its way; the CLI honors it for 30 seconds only. Each write is atomic. A 3-line file from an older daemon is still valid; the widgets then show a generic name.
+3. **`logibar-status`** reads these files. It selects the worst device, applies the thresholds, finds the colors, and prints the result. The `model` line becomes the device name in the tooltip, in the JSON (`devices[].name`) and in the Omarchy panel. The widgets accept a model only as ASCII letters, digits, space and `._()+/-`, 1 to 48 characters; any other line (accents, markup, control bytes, a longer name) keeps the generic name, so a file that the widget does not write cannot put markup into the tooltip. A NUL byte is dropped by the shell before the check. The name is the one that the device gives: its name in the receiver's pairing register, or HID++ DEVICE_NAME (`0x0005`), on the receiver and on the cable.
 4. For Waybar, the daemons also send `SIGRTMIN+N`. For the Omarchy shell, the plugin monitors the files and runs `logibar-status` again after each change.
 
 ### Keyboard and mouse: HID++ 2.0
 
 `logibar-hidpp-monitor` uses the standard **Logitech HID++ 2.0** protocol. [Solaar](https://github.com/pwr-Solaar/Solaar) uses the same protocol, but logibar sends the commands directly to hidapi, with no extra daemon.
 
-Lightspeed devices generally have two product IDs: one for the receiver and one for the USB cable. One thread monitors each product ID, and a shared state selects the live connection. The cable has priority. A cable-only line has the wireless PID `None` (for example, the G502 X LIGHTSPEED). This line does not share its state with the receiver line. If the cable and the receiver are both connected, the widget shows the lower battery level. It also shows the charging status of that reading, which can be old. For the MX Master 2S, Linux exposes a HID++ node with the device's Unifying WPID `4069`; the monitor finds its pairing slot and has no separate wired node.
+Each device paired to a receiver has its own row (`rx-<receiver>-<slot>`). The single-device widgets (`logibar-mouse`, `logibar-keyboard`) read one file for each kind (`mouse`, `keyboard`), which the daemon writes from those rows: the connected device of that kind with the lowest battery, with its own name. That is the same device that the combined widget and the Omarchy bar show; a device on its USB cable counts too. The cable reading also goes to its own file (`wired-mouse`, `wired-keyboard`), from which the combined widget and the Omarchy bar show the cable device next to the receiver rows: a cable reading hides only the silent row of that same device.
 
 To read most batteries, the daemon asks the ROOT feature at index `0x00` for the index of the UNIFIED_BATTERY feature (`0x1004`). Then it asks that feature for the charge:
 
@@ -449,9 +450,9 @@ Response: [0x11, device_idx, feature_index, 0x1d, SoC, level, status, ...]
                                                    └── State of Charge (0-100%)
 ```
 
-Byte 3 of a request is `(function << 4) | software_id`. hidraw copies every response to every open descriptor on a node, so each requester in the daemon signs with its own software ID (`0xD` for the battery monitors, `0xE` for the device-kind probe) and accepts only a response with its full echo. Broadcast events carry software ID `0`.
+Byte 3 of a request is `(function << 4) | software_id`. hidraw copies every response to every open descriptor on a node, so each request in the daemon signs with its own software ID (`0xD` for a battery query, and a rotation of 13 IDs for the receiver scan and the cable probe) and accepts only a response with its full echo. Broadcast events carry software ID `0`.
 
-To name the paired device, the daemon also sends one HID++ 1.0 request to the receiver. It sends the request when it opens the receiver. It also sends the request when it gets a wake event (`0x41`, link on). The request reads the pairing information of slot 1, which is the device that the battery requests go to. It is a long-register READ (sub-ID `0x83`). The daemon never sends the long-register write (`0x82`):
+To find the paired devices, the receiver scan sends one HID++ 1.0 request to the receiver for each slot. The request reads the pairing information of the slot: the wireless PID and the kind of the paired device. It is a long-register READ (sub-ID `0x83`). The daemon never sends the long-register write (`0x82`). For slot 1:
 
 ```
 Request:  [0x10, 0xff, 0x83, 0xb5, 0x20, 0x00, 0x00]
@@ -464,20 +465,20 @@ Response: [0x11, 0xff, 0x83, 0xb5, 0x20, ..., wpid_hi, wpid_lo, ...]
 Error:    [0x10, 0xff, 0x8f, 0x83, 0xb5, error, 0x00]
 ```
 
-The error report does not include the sub-register. Thus, an error can also be the answer to a request from a different program. After an error, the daemon continues to read. It stops when it gets the correct response, or when it gets no data for 50 ms. It also stops after 20 reads, also when the reports from other programs continue. Thus, the request can fail on a busy receiver. If the request fails when the daemon opens the receiver, the daemon shows the name from the table. If the request fails after a wake event, the daemon keeps the last name.
+The error report does not include the sub-register. Thus, an error can also be the answer to a request from a different program. After an error, the daemon continues to read. It stops when it gets the correct response, or when it gets no data for 50 ms. It also stops after 20 reads, also when the reports from other programs continue. Thus, the request can fail on a busy receiver; a busy answer is tried again, and a slot that gets no answer is read again at the next scan.
 
-The name from the pairing information applies only to a reading from the receiver. A reading from the cable uses the name of the cable PID.
+The name from the pairing information applies only to a reading from the receiver. A reading from the cable uses the name that the device gives on its cable (`0x0005`).
 
 The G915 TKL and G Pro Wireless instead expose BATTERY_VOLTAGE (`0x1001`). Its query is function 0 (request byte `0x0d`), and the response contains a two-byte millivolt reading and charging flags. Logibar converts that voltage to a percentage using the same discharge curve as Solaar. A drained cell converts to `0%`, which the widgets show as a critical reading — only `connected` decides visibility.
 
-The MX Master 2S exposes BATTERY_STATUS (`0x1000`), also queried with function 0. The monitor checks Unifying pairing slots 1–6 for WPID `4069` and sends subsequent battery queries to that slot. The device may report a level of `0` while charging or full. In that case logibar uses the same status-based approximations as Solaar: charging or almost full → 50%, full → 90%, slow charging → 20%. These are coarse estimates, not measured percentages. The charging indicator follows the reported status.
+The MX Master 2S exposes BATTERY_STATUS (`0x1000`), also queried with function 0. The scan reads it in the slot where it is paired. The device may report a level of `0` while charging or full. In that case logibar uses the same status-based approximations as Solaar: charging or almost full → 50%, full → 90%, slow charging → 20%. These are coarse estimates, not measured percentages. The charging indicator follows the reported status.
 
-Receiver `c539` is the LIGHTSPEED receiver of several other mice (G403, G703, G903, G502 LIGHTSPEED). The daemon reads the wireless PID of the paired mouse only to show its name. It does not use the PID to select the battery feature: the G Pro Wireless is the model verified on hardware. A mouse without BATTERY_VOLTAGE answers the feature lookup with index 0, so the daemon publishes no reading.
+The scan asks each device for UNIFIED_BATTERY, then BATTERY_STATUS, then BATTERY_VOLTAGE, and uses the first one that the device has. No battery feature is selected by product ID.
 
-After the first request, the daemon blocks on the device with a timeout of one second. The receiver sends a message after each change of the state:
+Between scans, one listener for each receiver blocks on the receiver with a timeout of one second. It sends no request to the devices. The receiver sends a message after each change of the state:
 
 - **Connection events** (`0x41`) — the device wakes, goes to sleep, or disconnects. Bit 6 of byte 4 is the `link_off` flag.
-- **Battery events** — the device reports a new charge, or the start or the end of a charge cycle.
+- **Battery events** — the device reports a new charge, or the start or the end of a charge cycle. The listener takes a HID++ 2.0 event only from the battery feature index that the scan found for that slot, with software ID `0`, and updates the row and the file of its kind at once. A HID++ 1.0 device reports a battery register instead; its reading changes at the next scan.
 
 ### Headset: a vendor protocol
 
@@ -500,49 +501,31 @@ The headset reports each power event, but it does not report a new charge withou
 
 ## Add a device
 
-To add another Logitech device to the keyboard and mouse daemon:
+A keyboard or a mouse needs no entry: the daemon finds it on a supported receiver or on its cable, and the device gives its own name and battery feature.
 
-1. Find the two product IDs of the device, one for the wireless connection and one for the cable:
+To add a receiver family that uses the same HID++ 1.0 pairing registers (Unifying and Lightspeed do; Bolt does not):
+
+1. Find the product ID of the receiver:
 
    ```bash
    lsusb | grep 046d
    ```
 
-2. Add a line to the `DEVICES` list in `logibar-hidpp-monitor`. The last field is the model name the widgets show: ASCII letters, digits, space and `._()+/-` only, 1 to 48 characters (`make test` checks it):
+2. Add the product ID and the number of pairing slots to `RECEIVER_SLOTS` in `logibar-hidpp-monitor`:
 
    ```python
-   DEVICES = [
-       (0x4069, None, "mouse", 10, "MX Master 2S"),
-       (0xc539, 0xc088, "mouse", 10, "G Pro Wireless"),
-       (0xc545, 0xc343, "keyboard", 9, "G915 TKL"),
-       (0xc547, 0xc357, "keyboard", 9, "G915 X TKL"),
-       (0xc547, 0xc094, "mouse", 10, "PRO X Superlight"),
-       (0xc54d, 0xc09b, "mouse", 10, "PRO X Superlight 2"),
-       (0xNEW1, 0xNEW2, "newdevice", 11, "Your device"),
-   ]
-   ```
-
-   Devices use UNIFIED_BATTERY (`0x1004`) by default. If the device instead exposes BATTERY_VOLTAGE (`0x1001`) or BATTERY_STATUS (`0x1000`), add its PID to `BATTERY_FEATURE_BY_RECEIVER`. A Unifying device with a device-specific hidraw node also needs a `UNIFYING_WPID_BY_PID` entry so the monitor discovers its pairing slot.
-
-   The receiver USB PID can already be in the table for a device of the same type. For example, `c547` is in the table for the PRO X Superlight. In that case, do not add a second line for the receiver. Add the wireless PID (WPID) of the device to `MODEL_BY_WPID`, with its device type and model name. The WPID is not the USB PID of the receiver. The kernel log shows the WPID, for example `logitech-hidpp-device 0003:046D:409F`. The daemon reads the WPID from the pairing register of the receiver (`0xb5`). It shows the model name only on a line of the same device type. For the cable, add a line with `None` as the wireless PID, as for the G502 X LIGHTSPEED.
-
-   A new model of a known device type (keyboard or mouse) does not need steps 3 and 4.
-
-3. Add the device to `DEVICE_IDS`, `DEVICE_ICON` and `DEVICE_NAME` in `logibar-status`. `DEVICE_NAME` is only the generic fallback for a state file without a model line; the name on screen comes from the daemon.
-
-4. To make a module for one device, copy `logibar-keyboard`, then set new values for `ICON`, `TOOLTIP` (the generic fallback) and `STATE_FILE`. Give the new Waybar module the same signal number as the daemon.
-
-5. Add an emulated sheet for the device to `EMULATED_SHEETS` in `tests/test_hidpp_monitor.py` — `make test` fails until every entry of `DEVICES` has one. Test with your physical hardware too: the sheet protects the device on FUTURE refactors of the daemon (the maintainer does not own every supported device), but it can only prove that the daemon honors what the sheet declares — it cannot prove that the sheet matches the real device.
-
-   ```python
-   EMULATED_SHEETS = {
-       ...
-       (0xNEW1, 0xNEW2): ("newdevice", 11, FakePairedDevice(
-           kind=0x03, battery=50)),
+   RECEIVER_SLOTS = {
+       0xc52b: 6, 0xc532: 6,  # Unifying
+       0xc539: 2, 0xc545: 2, 0xc547: 2, 0xc54d: 2,  # Lightspeed
+       0xNEW1: 2,
    }
    ```
 
-   `tests/fake_hid.py` emulates the hidraw layer: declared devices answer HID++ from their sheet, and every open descriptor receives a copy of every report, so the daemon runs against it unmodified. Note that the daemon's `DEVICE_KIND` only knows `keyboard` and `mouse` today — a new device TYPE also needs changes there and in the frontends.
+3. Add a test with an emulated receiver (`FakeReceiver` with a `FakePairedDevice` for each slot) to `CategoryProjectionTests` in `tests/test_hidpp_monitor.py`. Test with your physical hardware too: the sheet protects the receiver on FUTURE refactors of the daemon, but it can only prove that the daemon honors what the sheet declares — it cannot prove that the sheet matches the real device.
+
+   `tests/fake_hid.py` emulates the hidraw layer: declared devices answer HID++ from their sheet, and every open descriptor receives a copy of every report, so the daemon runs against it unmodified.
+
+A new device TYPE (not a keyboard or a mouse) also needs `DEVICE_IDS`, `DEVICE_ICON` and `DEVICE_NAME` in `logibar-status`, and, for a single-device widget, a copy of `logibar-keyboard` with new values for `ICON`, `TOOLTIP` and `STATE_FILE`.
 
 > [!TIP]
 > The [`tools/`](tools/) directory helps you to find the correct IDs:
