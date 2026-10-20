@@ -356,8 +356,9 @@ Panel {
       else lines.push(d.name + ": " + d.battery + "%"
         + (d.charging === true ? " · Charging" : ""))
     }
-    if (fullRefreshing) lines.push("Refreshing device readings…")
-    else if (refreshError !== "") lines.push(refreshError)
+    // A scan shows nothing: like G HUB, there is no refresh to watch.
+    // Only a refresh that cannot run says so.
+    if (!fullRefreshing && refreshError !== "") lines.push(refreshError)
     return lines.join("\n")
   }
 
@@ -841,52 +842,6 @@ Panel {
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             wrapMode: Text.WordWrap
-          }
-
-          // ---------- Refresh footer ----------
-          // The family's shape: status on the left, the refresh button on
-          // the right, at the bottom of the panel. The scan runs here, never
-          // as a glyph in the bar, which would shift the bar's other widgets.
-          PanelSeparator {
-            visible: root.hasData
-            foreground: root.foreground
-          }
-
-          Item {
-            visible: root.hasData
-            width: parent.width
-            implicitHeight: Math.max(refreshStatus.implicitHeight, refreshButton.implicitHeight)
-
-            Text {
-              id: refreshStatus
-              anchors.left: parent.left
-              anchors.right: refreshButton.left
-              anchors.rightMargin: Style.spacing.sm
-              anchors.verticalCenter: parent.verticalCenter
-              text: root.fullRefreshing ? "Scanning receivers…" : root.refreshError
-              textFormat: Text.PlainText
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              elide: Text.ElideRight
-            }
-
-            PanelActionButton {
-              id: refreshButton
-              anchors.right: parent.right
-              anchors.verticalCenter: parent.verticalCenter
-              // nf-md-refresh (U+F0450), written literally: a JS "\u" escape
-              // takes exactly four hex digits.
-              iconText: "󰑐"
-              tooltipText: "Refresh now"
-              foreground: root.dim
-              hoverColor: root.foreground
-              fontFamily: root.fontFamily
-              fontSize: Style.font.caption
-              size: Style.space(20)
-              enabled: !root.fullRefreshing
-              onClicked: root.requestFullRefresh()
-            }
           }
 
         }
