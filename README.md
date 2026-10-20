@@ -478,7 +478,7 @@ The scan asks each device for UNIFIED_BATTERY, then BATTERY_STATUS, then BATTERY
 Between scans, one listener for each receiver blocks on the receiver with a timeout of one second. It sends no request to the devices. The receiver sends a message after each change of the state:
 
 - **Connection events** (`0x41`) — the device wakes, goes to sleep, or disconnects. Bit 6 of byte 4 is the `link_off` flag.
-- **Battery events** — the device reports a new charge, or the start or the end of a charge cycle. The listener takes a HID++ 2.0 event only from the battery feature index that the scan found for that slot, with software ID `0`, and updates the row and the file of its kind at once. A HID++ 1.0 device reports a battery register instead; that report starts a scan.
+- **Battery events** — the device reports a new charge, or the start or the end of a charge cycle. The listener takes a HID++ 2.0 event only from the battery feature index that the scan found for that slot, with software ID `0`, and updates the row and the file of its kind at once. A HID++ 1.0 device reports a battery register instead; its reading changes at the next scan.
 
 ### Headset: a vendor protocol
 

@@ -1177,10 +1177,8 @@ def listen_receiver(path, max_slots):
                 # A HID++ 2.0 event: a battery reading when it comes from
                 # the battery feature index the scan found for that slot.
                 on_battery_event(f'rx-{rx}-{r[1]}', r)
-            elif r[0] == 0x10 and r[2] in (0x07, 0x0d):
-                # A HID++ 1.0 device reports its battery register: no index
-                # to decode against, so the scan reads it.
-                scan_requested.set()
+            # A HID++ 1.0 battery report has no index to decode against:
+            # the scan reads those devices.
     except Exception:
         # Unplugged (read raises) or a transient error: a scan in a few
         # seconds starts a new listener if the receiver is still there,
