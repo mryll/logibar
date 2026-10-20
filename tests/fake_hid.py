@@ -31,6 +31,7 @@ from collections import deque
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
+DEVICE_INFO_FEATURE = 0x0003
 DEVICE_NAME_FEATURE = 0x0005
 BATTERY_STATUS_FEATURE = 0x1000
 BATTERY_VOLTAGE_FEATURE = 0x1001
@@ -50,7 +51,8 @@ class FakePairedDevice:
     def __init__(self, kind, battery_feature=UNIFIED_BATTERY_FEATURE,
                  battery=None, voltage=None, charging=False, awake=True,
                  name_index=0x03, battery_index=None, wpid=None,
-                 pairing_slot=1, name="Fake Logitech", legacy_level=None):
+                 pairing_slot=1, name="Fake Logitech", legacy_level=None,
+                 model_ids=None, info_index=0x02):
         if battery_feature not in _DEFAULT_BATTERY_INDEX:
             raise ValueError(f"unsupported battery feature 0x{battery_feature:04x}")
         if battery_index is None:
@@ -73,10 +75,16 @@ class FakePairedDevice:
         self.pairing_slot = pairing_slot
         self.name = name
         self.legacy_level = legacy_level
+        # getDeviceInfo (0x0003) model id: the PIDs of the device's
+        # transports, e.g. [wireless PID, cable PID]. None: no such feature.
+        self.model_ids = model_ids
+        self.info_index = info_index
 
     def feature_index(self, feature_id):
         known = {DEVICE_NAME_FEATURE: self.name_index,
                  self.battery_feature: self.battery_index}
+        if self.model_ids is not None:
+            known[DEVICE_INFO_FEATURE] = self.info_index
         return known.get(feature_id, 0)
 
     def respond(self, cmd):
@@ -109,7 +117,18 @@ class FakePairedDevice:
             return self._name_feature_report(cmd)
         if len(cmd) >= 4 and cmd[0] == 0x11 and cmd[2] == self.battery_index:
             return self._battery_report(cmd)
+        if (len(cmd) >= 4 and cmd[0] == 0x11 and self.model_ids is not None
+                and cmd[2] == self.info_index):
+            return self._device_info_report(cmd)
         return None, f"unknown command {bytes(cmd[:8]).hex()}"
+
+    def _device_info_report(self, cmd):
+        if cmd[3] >> 4 != 0x0:  # getDeviceInfo
+            return None, f"unsupported DEVICE_INFO function byte 0x{cmd[3]:02x}"
+        pids = (list(self.model_ids) + [0, 0, 0])[:3]
+        model = [b for pid in pids for b in (pid >> 8, pid & 0xff)]
+        return bytes([0x11, cmd[1], cmd[2], cmd[3], 0x01, 0xec, 0x28, 0xd3, 0xd0,
+                      0x00, 0x05] + model + [0x00]), None
 
     def _pairing_info_report(self, cmd):
         """HID++ 1.0 long-register read. Only the configured pairing slot is
@@ -522,43 +541,28 @@ class DaemonHarness:
 
     def start_wireless(self, wireless_pid, name, signal, battery_feature=None,
                        barrier=None, state=None, state_lock=None):
-        state = state or self._fresh_state(wireless_pid, None)
+        state = state or self._fresh_state(wireless_pid, name)
         feature = battery_feature or UNIFIED_BATTERY_FEATURE
         self._spawn(self.module.monitor_wireless,
                     (wireless_pid, name, signal, feature, state,
                      state_lock or threading.Lock()), barrier)
         return state
 
-    def start_wired(self, wired_pid, name, signal, battery_feature=None,
-                    barrier=None, state=None, state_lock=None):
-        state = state or self._fresh_state(None, wired_pid)
-        feature = battery_feature or UNIFIED_BATTERY_FEATURE
-        self._spawn(self.module.monitor_wired,
-                    (wired_pid, name, signal, feature, state,
-                     state_lock or threading.Lock()), barrier)
-        return state
+    def start_cable(self, path, pid, barrier=None):
+        """One cable monitor, as ensure_cable_monitors starts it."""
+        self._spawn(self.module.monitor_cable, (path, pid), barrier)
 
-    def start_device(self, wireless_pid, wired_pid, name, signal,
-                     battery_feature=None):
-        state = self._fresh_state(wireless_pid, wired_pid)
-        lock = threading.Lock()
-        feature = battery_feature or UNIFIED_BATTERY_FEATURE
-        self.start_wireless(wireless_pid, name, signal, feature,
-                            state=state, state_lock=lock)
-        self.start_wired(wired_pid, name, signal, feature,
-                         state=state, state_lock=lock)
-        return state
+    def set_receiver_rows(self, rows):
+        """What the last receiver scan found: {row id: wireless PID}."""
+        self.module.receiver_row_wpids = dict(rows)
 
-    def _fresh_state(self, wireless_pid, wired_pid):
+    def _fresh_state(self, wireless_pid, name="mouse"):
         return {
-            '_source_id': (wireless_pid, wired_pid),
+            '_source_id': (wireless_pid, name),
             'wireless_connected': False,
-            'wired_connected': False,
-            'wired_just_disconnected': False,
             'battery': None,
             'charging': None,
             'feat_idx': None,
-            'wired_feat_idx': None,
         }
 
     def _spawn(self, target, args, barrier):
