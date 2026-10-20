@@ -2087,6 +2087,18 @@ class ReceiverDiscoveryTests(unittest.TestCase):
         mod.publish_discovered(devices, time.time() + 1)   # a scan newer than the mark
         self.assertEqual(row.read_text().splitlines()[6:7], [])
 
+    def test_a_link_down_during_a_scan_wins_over_the_scan(self):
+        # Live: the M720 switched off, a scan already running had heard it,
+        # and its publish brought the row back for 1.4 s.
+        mouse = FakePairedDevice(kind=0x03, battery=50, wpid=0x405E, name="M720 Triathlon")
+        bus, mod, row = self._listening(FakeReceiver({1: mouse}))
+        started = time.time()
+        devices = mod.discover_receiver_devices()   # the scan hears it...
+        bus.emit_link(b"/dev/unifying", off=True, slot=1)   # ...then it goes
+        self._wait_for(row, lambda l: l[1] == "0")
+        mod.publish_discovered(devices, started)
+        self.assertEqual(row.read_text().splitlines()[:2], ["50", "0"])
+
     def test_multiple_models_and_legacy_device_share_receiver(self):
         receiver = FakeReceiver({
             1: FakePairedDevice(kind=0x00, battery=50, legacy_level=73,

@@ -1263,6 +1263,9 @@ def publish_discovered(devices, started=None):
     now = int(time.time())
     for device in devices:
         battery = device['battery']
+        if (battery is not None and started is not None
+                and link_down_at.get(device['id'], 0) >= started):
+            battery = None
         previous = previous_receiver_reading(device, now) if battery is None else None
         stored_battery = battery if battery is not None else (previous[0] if previous else 0)
         last_seen = now if battery is not None else (previous[1] if previous else 0)
@@ -1334,6 +1337,11 @@ LISTEN_TIMEOUT_MS = 1000
 HOTPLUG_CHECK_SECONDS = 2.0
 listeners = {}
 listeners_lock = threading.Lock()
+# row id -> time.time() of its last link-down event. A scan that started
+# before it may still have heard the device answer; that answer is older
+# than the link-down and must not bring the row back (seen live: the M720
+# switched off, reappeared for 1.4 s, then went).
+link_down_at = {}
 
 def on_link_change(row_id, link_off):
     """Rewrite the device's row for a link change and ask for a scan. Only a
@@ -1345,6 +1353,7 @@ def on_link_change(row_id, link_off):
         lines = raw.decode('utf-8', errors='replace').splitlines()[:6]
         if len(lines) == 6:
             if link_off:
+                link_down_at[row_id] = time.time()
                 lines[1], lines[2] = '0', '0'
             elif lines[1] != '1':
                 lines.append(CONNECTING_MARK)
