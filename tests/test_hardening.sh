@@ -247,6 +247,28 @@ check   "--json survives a FIFO state file (JSON)" jq -e '.schema_version == 1' 
 check   "--json reports the FIFO device as disconnected" \
     jq -e '.devices[] | select(.id == "mouse") | .connected == false' <<< "$OUT"
 
+# The cable reading of a kind (wired-mouse) is read only next to a receiver
+# registry. Each hostile form leaves the receiver row alone; a 10 MiB file
+# is read up to the cap and still gives its reading.
+for form in fifo dir zero blob; do
+    reset_all
+    printf 'logibar-receivers-v1\nrx-0a0b0c0d-1\tmouse\n' > "$TMP/run/logibar/receiver-devices"
+    printf '55\n1\n0\nM720 Triathlon\n%s\n405e' "$(date +%s)" > "$TMP/run/logibar/rx-0a0b0c0d-1"
+    case $form in
+        fifo) mkfifo "$TMP/run/logibar/wired-mouse" ;;
+        dir)  mkdir "$TMP/run/logibar/wired-mouse" ;;
+        zero) ln -s /dev/zero "$TMP/run/logibar/wired-mouse" ;;
+        blob) { printf '66\n1\n1\nPRO X 2\nwired rx-0a0b0c0d\n'; head -c 10485760 /dev/zero | tr '\0' 'x'; } \
+                  > "$TMP/run/logibar/wired-mouse" ;;
+    esac
+    run_capture logibar-status --json
+    checkeq "a $form wired-mouse: --json answers (rc)" 0 "$RC"
+    check   "a $form wired-mouse: the receiver row stays" \
+        jq -e '[.devices[] | select(.id == "rx-0a0b0c0d-1" and .battery == 55)] | length == 1' <<< "$OUT"
+done
+check "a 10 MiB wired-mouse still reads 66%" \
+    jq -e '[.devices[] | select(.id == "mouse" and .battery == 66 and .charging)] | length == 1' <<< "$OUT"
+
 reset_all
 for i in 0 1 2; do
     mkfifo "$TMP/run/logibar/${DEVICES[$i]}"

@@ -316,9 +316,9 @@ load_dynamic_registry() {
     done < <(printf '%s\n' "$blob" | tail -n +2)
 }
 
-read_one_device() {
+read_one_device() {  # read_one_device ID [FILE]: FILE defaults to ID
     local id="$1" file battery connected charging model seen mark blob now epoch mtime
-    file="$STATE_DIR/$id"
+    file="$STATE_DIR/${2:-$id}"
     BATTERY[$id]=""; CONNECTED[$id]=0; CHARGING[$id]=0; STATE[$id]="disconnected"; UPDATED[$id]=""
     LAST_KNOWN[$id]=""; LAST_SEEN[$id]=""; SOURCE[$id]=""; WIRED_RX[$id]=""
     NAME[$id]="${DEVICE_NAME[$id]}"
@@ -383,7 +383,15 @@ read_devices() {
                 found=true; break
             fi
         done
-        read_one_device "$kind"
+        # The daemon writes the lowest device of the kind to "$kind" (for
+        # the single-device widgets) and the cable reading to "wired-$kind":
+        # here only the cable one counts. A daemon without that file wrote
+        # the cable reading to "$kind".
+        if [[ "$kind" != headset && -e "$STATE_DIR/wired-$kind" ]]; then
+            read_one_device "$kind" "wired-$kind"
+        else
+            read_one_device "$kind"
+        fi
         if $found; then
             # The cable always wins. A device charging on its cable still has
             # its pairing on the receiver, which no longer reaches it: that row

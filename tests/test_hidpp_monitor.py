@@ -191,7 +191,7 @@ class StateAggregationTests(unittest.TestCase):
             monitor.source_states.clear()
             monitor.published_states.clear()
 
-    def test_a_cable_reading_wins_over_a_lower_wireless_one(self):
+    def test_the_lowest_reading_and_the_cable_reading_have_their_own_files(self):
         # The wireless mouse has its own receiver row; the cable mouse has
         # only this file. Lowest-wins hid the cable mouse entirely.
         original_state_dir = monitor.STATE_DIR
@@ -209,7 +209,10 @@ class StateAggregationTests(unittest.TestCase):
 
                 monitor.write_state("mouse", 30, True, False, 10, wireless)
                 monitor.write_state("mouse", 80, True, False, 10, cable)
-                self.assertTrue((Path(state_dir) / "mouse").read_text()
+                # The single-device widget shows the lowest, like the bar;
+                # the CLI reads the cable reading from its own file.
+                self.assertEqual((Path(state_dir) / "mouse").read_text(), "30\n1\n0\n")
+                self.assertTrue((Path(state_dir) / "wired-mouse").read_text()
                                 .startswith("80\n1\n0\nG Pro Wireless\nwired"))
         finally:
             monitor.STATE_DIR = original_state_dir
@@ -813,18 +816,24 @@ class CategoryProjectionTests(unittest.TestCase):
         mod.scan_receivers()
         self.assertEqual((state / "mouse").read_text(), "0\n0\n0\n")
 
-    def test_a_cable_reading_still_wins_over_the_receiver_one(self):
-        _, mod, _, state = self.scan([FakeNode(b"/dev/lightspeed", 0xC54D, FakeReceiver({
-            1: FakePairedDevice(kind=0x03, battery=30, wpid=0x40A9, name="PRO X 2")}))],
-            slots={0xC54D: 1})
+    def test_a_cable_mouse_and_a_lower_receiver_mouse(self):
+        # Seen on the probook: the PRO X 2 at 98 % on its cable, the M720 at
+        # 50 % on its receiver. The bar's lowest face shows the M720, and so
+        # must the single-device widget; the cable reading goes to the CLI.
+        _, mod, _, state = self.scan([FakeNode(b"/dev/unifying", 0xC52B, FakeReceiver({
+            1: FakePairedDevice(kind=0x03, battery=50, wpid=0x405E, name="M720 Triathlon")}))],
+            slots={0xC52B: 1})
+        rx = mod.receiver_hash(b"/dev/unifying")
+        mod.receiver_row_wpids[f"rx-{rx}-2"] = 0x40A9
         cable = {'_source_id': ('cable', b'/dev/hidraw9'), 'wired_connected': True,
                  '_model': 'PRO X 2', '_cable_wpids': frozenset({0x40A9})}
-        mod.write_state("mouse", 90, True, True, 10, cable)
-        rx = mod.receiver_hash(b"/dev/lightspeed")
-        self.assertEqual((state / "mouse").read_text(), f"90\n1\n1\nPRO X 2\nwired rx-{rx}")
-        mod.write_state("mouse", 0, False, False, 10, dict(cable, wired_connected=False))
-        self.assertEqual((state / "mouse").read_text(), "30\n1\n0\nPRO X 2")
+        mod.write_state("mouse", 98, True, True, 10, cable)
+        self.assertEqual((state / "mouse").read_text(), "50\n1\n0\nM720 Triathlon")
+        self.assertEqual((state / "wired-mouse").read_text(), f"98\n1\n1\nPRO X 2\nwired rx-{rx}")
         self.assertTrue(mod.scan_requested.is_set(), "a cable change asks for a scan")
+        mod.write_state("mouse", 0, False, False, 10, dict(cable, wired_connected=False))
+        self.assertEqual((state / "mouse").read_text(), "50\n1\n0\nM720 Triathlon")
+        self.assertEqual((state / "wired-mouse").read_text(), "0\n0\n0\n")
 
     def test_the_devices_of_the_old_list_are_read_by_the_receiver_scan(self):
         # The devices that had a line in the old table, as contributors
@@ -1127,6 +1136,23 @@ class ReceiverDiscoveryTests(unittest.TestCase):
         })
         self.assertEqual([(d['id'], d['battery'], d['charging']) for d in status['devices']],
                          [("mouse", 41, True)])
+
+    def test_the_cli_takes_the_cable_reading_from_its_own_file(self):
+        # The probook case: "mouse" is the lowest (the M720, for the
+        # single-device widget); the cable PRO X 2 is in "wired-mouse". The
+        # CLI shows both, hides the silent row of the cabled mouse, and its
+        # lowest is the M720.
+        now = int(time.time())
+        status = self._status_with({
+            "receiver-devices": "logibar-receivers-v1\nrx-0a0b0c0d-1\tmouse\nrx-11223344-1\tmouse\n",
+            "rx-0a0b0c0d-1": f"50\n1\n0\nM720 Triathlon\n{now}\n405e",
+            "rx-11223344-1": f"98\n0\n0\nPRO X 2\n{now - 60}\n40a9",
+            "mouse": "50\n1\n0\nM720 Triathlon",
+            "wired-mouse": "98\n1\n1\nPRO X 2\nwired rx-11223344",
+        }, flags=())
+        self.assertEqual(sorted((d['id'], d['name'], d['battery']) for d in status['devices']),
+                         [("mouse", "PRO X 2", 98), ("rx-0a0b0c0d-1", "M720 Triathlon", 50)])
+        self.assertEqual(status['aggregate']['worst_battery'], 50)
 
     def test_a_live_cable_keeps_a_sleeping_device_on_another_receiver(self):
         # A G Pro on its cable says nothing about an MX Master asleep on a
@@ -1638,14 +1664,16 @@ class ReceiverDiscoveryTests(unittest.TestCase):
             mod.scan_receivers()
             self.assertEqual(status()['devices'], [])
             category = Path(mod.STATE_DIR) / 'mouse'
+            cable = Path(mod.STATE_DIR) / 'wired-mouse'
             category.write_text('90\n1\n0\nMX Master 2S')
             self.assertEqual(status()['devices'], [])
-            category.write_text('80\n1\n0\nG Pro Wired\nwired')
+            cable.write_text('80\n1\n0\nG Pro Wired\nwired')
             self.assertEqual(status()['devices'][0]['battery'], 80)
             receiver.devices[1] = mouse
             del bus.nodes[b"/dev/unifying"]
             mod.scan_receivers()
             self.assertEqual(status()['devices'][0]['battery'], 80)
+            cable.unlink()
             category.unlink()
             self.assertEqual(status()['devices'], [])
         self.assertEqual(bus.protocol_errors, [])

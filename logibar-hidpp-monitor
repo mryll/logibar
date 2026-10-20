@@ -99,63 +99,66 @@ def cable_receivers(wpids):
 def receiver_hash(path):
     return hashlib.blake2s(path, digest_size=4).hexdigest()
 
+def state_lines(source):
+    """Four lines: battery, connected, charging, model. A cable reading adds
+    "wired" and the receivers that have a row for the cable device ("wired
+    rx-1a2b3c4d"): the CLI hides only the silent rows on those receivers,
+    never a sleeping device elsewhere. Nothing connected: no model either."""
+    battery, connected, charging, model, wired, receivers = source
+    return (f"{battery}\n{1 if connected else 0}\n{1 if charging else 0}\n{model}"
+            + ('\nwired' + ''.join(f' {rx}' for rx in receivers) if wired else ''))
+
+def publish_file(name, content):
+    """Write one state file unless it already says this; True if written.
+    The caller holds publish_lock."""
+    if published_states.get(name) == content:
+        return False
+    fd, tmp_path = tempfile.mkstemp(dir=STATE_DIR)
+    try:
+        os.write(fd, content.encode())
+        os.close(fd)
+        os.rename(tmp_path, f"{STATE_DIR}/{name}")
+    except:
+        try:
+            os.close(fd)
+        except:
+            pass
+        try:
+            os.unlink(tmp_path)
+        except:
+            pass
+        raise
+    published_states[name] = content
+    return True
+
 def write_state(name, battery, connected, charging, waybar_signal, state):
-    """Publish a connected cable, else the lowest connected source, for a
-    logical device."""
+    """Publish one source of a kind (the receiver projection or a cable
+    device) into the two files of that kind:
+
+    - `<kind>`: the connected source with the lowest battery, cable or not.
+      The single-device widgets read it, so they show the same device as the
+      lowest face of the combined widget and the Omarchy bar.
+    - `wired-<kind>`: the cable source with the lowest battery, or nothing
+      connected. The CLI reads the cable reading from it: a cable device has
+      no receiver row of its own."""
     os.makedirs(STATE_DIR, exist_ok=True, mode=0o700)
-    state_file = f"{STATE_DIR}/{name}"
     wired = bool(state.get('wired_connected'))
     receivers = cable_receivers(state.get('_cable_wpids', ())) if wired else ()
+    nothing = (0, False, False, '', False, ())
 
     try:
         with publish_lock:
             sources = source_states.setdefault(name, {})
-            # The paired name describes the device on the receiver; a cable
-            # state has none, its model is the name the device gave.
-            paired = state.get('_paired_model')
-            model = paired or state.get('_model', '')
-            sources[state['_source_id']] = (battery, connected, charging, model,
-                                            wired, receivers)
+            sources[state['_source_id']] = (battery, connected, charging,
+                                            state.get('_model', ''), wired, receivers)
             connected_sources = [source for source in sources.values() if source[1]]
-            # A cable reading wins over a lower wireless one: every wireless
-            # line in DEVICES sits on a receiver that discovery scans, so
-            # that reading already has its own receiver row, and the cable
-            # one has no other place to show.
-            pool = [source for source in connected_sources if source[4]] or connected_sources
-            selected = min(pool, key=lambda source: source[0]) if pool else (0, False, False, '', False, ())
-            # Four lines: battery, connected, charging, model; a cable reading
-            # adds "wired" as a fifth line so receiver discovery can keep a
-            # real cable reading without reviving stale wireless category data.
-            # The fifth line also names the receivers that have a row for the
-            # cable device ("wired rx-1a2b3c4d"): the CLI hides only the
-            # silent rows on those receivers, never a sleeping device elsewhere.
-            # The model is the
-            # one of the selected source, so a shared receiver names the device
-            # whose reading is shown. Nothing connected: no model either.
-            new_state = (f"{selected[0]}\n{1 if selected[1] else 0}\n"
-                         f"{1 if selected[2] else 0}\n{selected[3]}"
-                         + ('\nwired' + ''.join(f' {rx}' for rx in selected[5])
-                            if selected[4] else ''))
-            if published_states.get(name) == new_state:
+            cables = [source for source in connected_sources if source[4]]
+            lowest = min(connected_sources, key=lambda source: source[0], default=nothing)
+            cable = min(cables, key=lambda source: source[0], default=nothing)
+            changed = publish_file(name, state_lines(lowest))
+            changed = publish_file(f"wired-{name}", state_lines(cable)) or changed
+            if not changed:
                 return
-
-            # Atomic write: write to temp file, then rename
-            fd, tmp_path = tempfile.mkstemp(dir=STATE_DIR)
-            try:
-                os.write(fd, new_state.encode())
-                os.close(fd)
-                os.rename(tmp_path, state_file)
-            except:
-                try:
-                    os.close(fd)
-                except:
-                    pass
-                try:
-                    os.unlink(tmp_path)
-                except:
-                    pass
-                raise
-            published_states[name] = new_state
             # A cable change can hide or show a receiver row: scan. The
             # receiver projection comes from a scan or a receiver event and
             # has nothing new for one.
