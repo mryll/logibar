@@ -1728,12 +1728,15 @@ class ClickRefreshTests(unittest.TestCase):
 
 
 class ReceiverDiscoveryTests(unittest.TestCase):
-    def _status_with(self, files, flags=("--last-known",)):
+    def _status_with(self, files, flags=("--last-known",), ages=None):
         with tempfile.TemporaryDirectory() as tmp:
             state = Path(tmp) / "logibar"
             state.mkdir()
             for name, content in files.items():
                 (state / name).write_text(content)
+            for name, seconds in (ages or {}).items():
+                then = time.time() - seconds
+                os.utime(state / name, (then, then))
             env = os.environ.copy()
             env['XDG_RUNTIME_DIR'] = tmp
             done = subprocess.run([str(SCRIPT.parent / 'logibar-status'), '--json', *flags],
@@ -1766,6 +1769,25 @@ class ReceiverDiscoveryTests(unittest.TestCase):
         })
         self.assertEqual(sorted((d['id'], d['state']) for d in status['devices']),
                          [("mouse", "ok"), ("rx-11223344-1", "last_known")])
+
+    def test_a_device_whose_link_came_up_is_connecting_for_a_while(self):
+        now = int(time.time())
+        files = {
+            "receiver-devices": "logibar-receivers-v1\nrx-11223344-1\tmouse\n",
+            "rx-11223344-1": f"55\n0\n0\nM720 Triathlon\n{now - 600}\n405e\nconnecting",
+        }
+        status = self._status_with(files, flags=())
+        [device] = status['devices']
+        self.assertEqual((device['state'], device['battery'], device['connected']),
+                         ("connecting", None, False))
+        self.assertEqual(status['aggregate']['connected_count'], 0)
+        # The same mark 31 s old: a daemon that stopped mid-scan.
+        [device] = self._status_with(files, flags=(), ages={"rx-11223344-1": 31})['devices']
+        self.assertEqual(device['state'], "disconnected")
+        # A reading wins over the mark.
+        files["rx-11223344-1"] = f"55\n1\n0\nM720 Triathlon\n{now}\n405e\nconnecting"
+        [device] = self._status_with(files, flags=())['devices']
+        self.assertEqual((device['state'], device['battery']), ("ok", 55))
 
     def test_without_last_known_a_silent_device_is_disconnected(self):
         # The default: the receiver cannot tell asleep from off, and a device
@@ -1991,6 +2013,79 @@ class ReceiverDiscoveryTests(unittest.TestCase):
             mod.HIDRAW_CLASS_DIR = os.path.join(tmp, "no-hidraw")
             [device] = mod.scan_receivers()
         self.assertEqual((device['name'], device['battery']), ("K750", 73))
+
+    def test_notifications_keep_the_flags_another_program_set(self):
+        # Register 0x00 is the one hardware write: read, OR, write back.
+        receiver = FakeReceiver({1: FakePairedDevice(kind=0x03, battery=50, wpid=0x405E)})
+        receiver.notification_flags = 0x000010   # a flag logibar does not own
+        bus = FakeHidBus([FakeNode(b"/dev/unifying", 0xC52B, receiver)])
+        mod = load_monitor_module(bus)
+        dev = mod.hid.device()
+        dev.open_path(b"/dev/unifying")
+        mod.enable_notifications(dev)
+        self.assertEqual(receiver.notification_writes, [0x000910])
+        mod.enable_notifications(dev)
+        self.assertEqual(receiver.notification_writes, [0x000910], "set bits are not written again")
+
+    def _listening(self, receiver, slots=1):
+        bus = FakeHidBus([FakeNode(b"/dev/unifying", 0xC52B, receiver)])
+        mod = load_monitor_module(bus)
+        mod.RECEIVER_SLOTS = {0xC52B: slots}
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        mod.STATE_DIR = os.path.join(tmp.name, "logibar")
+        mod.HIDRAW_CLASS_DIR = os.path.join(tmp.name, "no-hidraw")
+        [device] = mod.scan_receivers()
+        listener = threading.Thread(target=mod.listen_receiver,
+                                    args=(b"/dev/unifying", slots), daemon=True)
+        listener.start()
+        self.addCleanup(listener.join, 3)
+        self.addCleanup(setattr, mod, 'running', False)
+        time.sleep(0.2)   # the listener enables notifications first
+        return bus, mod, Path(mod.STATE_DIR) / device['id']
+
+    def _wait_for(self, row, predicate):
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            lines = row.read_text().splitlines()
+            if predicate(lines):
+                return lines
+            time.sleep(0.02)
+        self.fail(f"row never matched: {row.read_text()!r}")
+
+    def test_a_link_change_updates_the_row_at_once(self):
+        # Like G HUB: off -> the row stops answering at once; on -> it says
+        # connecting until the scan brings the reading.
+        mouse = FakePairedDevice(kind=0x03, battery=50, wpid=0x405E, name="M720 Triathlon")
+        bus, mod, row = self._listening(FakeReceiver({1: mouse}))
+        self.assertEqual(row.read_text().splitlines()[:2], ["50", "1"])
+
+        mod.scan_requested.clear()
+        bus.emit_link(b"/dev/unifying", off=True, slot=1)
+        lines = self._wait_for(row, lambda l: l[1] == "0")
+        self.assertEqual(lines[0], "50", "the reading stays for --last-known")
+        self.assertTrue(mod.scan_requested.is_set())
+
+        bus.emit_link(b"/dev/unifying", off=False, slot=1)
+        self._wait_for(row, lambda l: l[6:7] == ["connecting"])
+        mod.scan_receivers()
+        self.assertEqual(row.read_text().splitlines(),
+                         ["50", "1", "0", "M720 Triathlon", row.read_text().splitlines()[4], "405e"])
+
+    def test_a_scan_already_running_keeps_a_newer_connecting_mark(self):
+        mouse = FakePairedDevice(kind=0x03, battery=50, wpid=0x405E, name="M720 Triathlon")
+        bus, mod, row = self._listening(FakeReceiver({1: mouse}))
+        bus.emit_link(b"/dev/unifying", off=True, slot=1)
+        self._wait_for(row, lambda l: l[1] == "0")
+        started = time.time()
+        devices = mod.discover_receiver_devices()   # the scan finds no answer...
+        bus.emit_link(b"/dev/unifying", off=False, slot=1)   # ...the link comes up meanwhile
+        mouse.awake = False
+        self._wait_for(row, lambda l: l[6:7] == ["connecting"])
+        mod.publish_discovered(devices, started)
+        self.assertEqual(row.read_text().splitlines()[6:7], ["connecting"])
+        mod.publish_discovered(devices, time.time() + 1)   # a scan newer than the mark
+        self.assertEqual(row.read_text().splitlines()[6:7], [])
 
     def test_multiple_models_and_legacy_device_share_receiver(self):
         receiver = FakeReceiver({

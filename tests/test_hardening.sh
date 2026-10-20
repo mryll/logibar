@@ -505,6 +505,18 @@ check "the bar draws no scan glyph (it shifted the other widgets)" \
 check "the CLI keeps a silent device only with --last-known" \
     grep -qF 'if [[ "$connected" != "1" ]] && $SHOW_LAST_KNOWN; then' "$REPO/logibar-status"
 
+# ── the receiver register write keeps foreign flags; connecting is bounded ──
+#
+# Register 0x00 is the one write logibar makes to hardware state, and the link
+# listener makes it on every receiver, also on ones another program set up.
+
+check "notifications are read before they are written" \
+    grep -qF 'current = read_notification_flags(dev)' "$REPO/logibar-hidpp-monitor"
+check "the notification write ORs into the flags it read" \
+    grep -qF 'flags = (current or 0) | wanted' "$REPO/logibar-hidpp-monitor"
+check "the connecting mark counts for 30 seconds only" \
+    grep -qx 'CONNECTING_SECONDS=30' "$REPO/logibar-status"
+
 # ── the README installs from upstream only ───────────────────────────────────
 #
 # An external contribution once pointed every install command at its fork.
