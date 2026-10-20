@@ -1365,6 +1365,8 @@ link_down_at = {}
 # Serializes the two writers of a receiver row (the listener and the scan),
 # so a link event cannot land between the scan's check and its write.
 rows_lock = threading.Lock()
+# Receiver paths already logged as not answering the register read.
+unanswered_receivers = set()
 
 def on_link_change(row_id, link_off):
     """Rewrite the device's row for a link change and ask for a scan. Only a
@@ -1393,8 +1395,17 @@ def listen_receiver(path, max_slots):
     try:
         dev.open_path(path)
         if not enable_notifications(dev, blind=False):
-            print(f'logibar-hidpp-monitor: receiver {path!r} did not answer the notification '
-                  'register read; its devices appear with the next scan', file=sys.stderr)
+            # Without its link events the listener is no use. Give its place
+            # back to the periodic scan (not the short retry: a receiver that
+            # never answers would scan every few seconds), and log it once.
+            if path not in unanswered_receivers:
+                unanswered_receivers.add(path)
+                print(f'logibar-hidpp-monitor: receiver {path!r} did not answer the notification '
+                      'register read; its devices appear with the next scan', file=sys.stderr)
+            with listeners_lock:
+                listener_retry_at[path] = time.monotonic() + DISCOVERY_INTERVAL
+            return
+        unanswered_receivers.discard(path)
         # The register exchange above reads and drops whatever arrives, a
         # link event included: one scan covers that window.
         scan_requested.set()

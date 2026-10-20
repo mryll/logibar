@@ -2127,6 +2127,25 @@ class ReceiverDiscoveryTests(unittest.TestCase):
         self.assertTrue(mod.scan_requested.wait(2), "a scan comes after the retry time")
         mod.running = False
 
+    def test_a_listener_without_notifications_waits_for_the_periodic_scan(self):
+        receiver = FakeReceiver({1: FakePairedDevice(kind=0x03, battery=50, wpid=0x405E)})
+        bus = FakeHidBus([FakeNode(b"/dev/unifying", 0xC52B, receiver)])
+        mod = load_monitor_module(bus)
+        mod.RECEIVER_SLOTS = {0xC52B: 1}
+        mod.LISTENER_RETRY_SECONDS = 0.2
+        mod.enable_notifications = lambda dev, blind=True: False   # the read gets no answer
+        mod.listeners[b"/dev/unifying"] = None
+        mod.scan_requested.clear()
+        before = time.monotonic()
+        mod.listen_receiver(b"/dev/unifying", 1)
+        self.assertNotIn(b"/dev/unifying", mod.listeners, "it does not stay without link events")
+        self.assertGreaterEqual(mod.listener_retry_at[b"/dev/unifying"],
+                                before + 300, "the next try waits for the periodic scan")
+        self.assertFalse(mod.scan_requested.wait(0.5), "no fast scan loop")
+        mod.ensure_listeners()
+        self.assertNotIn(b"/dev/unifying", mod.listeners, "no restart before the periodic scan")
+        mod.running = False
+
     def test_multiple_models_and_legacy_device_share_receiver(self):
         receiver = FakeReceiver({
             1: FakePairedDevice(kind=0x00, battery=50, legacy_level=73,
