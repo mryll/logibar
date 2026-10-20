@@ -893,12 +893,21 @@ def publish_discovered(devices, started=None):
     device, so a scan that found no answer keeps it instead of erasing it."""
     global receiver_row_wpids, receiver_row_battery
     now = int(time.time())
-    for device in devices:
-        with rows_lock:
+    # The rows and the maps change together, under the lock the battery
+    # events take: an event decodes against the pairing its row names.
+    with rows_lock:
+        battery_map = {}
+        for device in devices:
             publish_receiver_row(device, started, now)
-    receiver_row_wpids = {device['id']: device['wpid'] for device in devices}
-    receiver_row_battery = {device['id']: (device['battery_feature'], device['battery_index'])
-                            for device in devices if device.get('battery_index')}
+            row_id = device['id']
+            if device.get('battery_index'):
+                battery_map[row_id] = (device['battery_feature'], device['battery_index'])
+            elif receiver_row_wpids.get(row_id) == device['wpid'] and row_id in receiver_row_battery:
+                # A scan that did not reach the device keeps what the last
+                # one learned: its events still decode until a scan reads it.
+                battery_map[row_id] = receiver_row_battery[row_id]
+        receiver_row_wpids = {device['id']: device['wpid'] for device in devices}
+        receiver_row_battery = battery_map
     lines = ['logibar-receivers-v1']
     lines.extend(f"{device['id']}\t{device['kind']}" for device in devices)
     atomic_state_write(os.path.join(STATE_DIR, DISCOVERY_MANIFEST), '\n'.join(lines) + '\n')
@@ -906,7 +915,13 @@ def publish_discovered(devices, started=None):
 
 def publish_receiver_row(device, started, now):
     """Write one receiver row; the caller holds rows_lock. A link-down newer
-    than the scan wins over the answer the scan heard before it."""
+    than the scan wins over the answer the scan heard before it, and so does
+    a battery event: the row it wrote is newer than this scan's view."""
+    if started is not None and battery_event_at.get(device['id'], 0) >= started:
+        raw = read_small_file(os.path.join(STATE_DIR, device['id']), 512)
+        lines = raw.decode('utf-8', errors='replace').splitlines() if raw else []
+        if lines[5:6] == [f"{device['wpid']:04x}"]:
+            return
     battery = device['battery']
     if (battery is not None and started is not None
             and link_down_at.get(device['id'], 0) >= started):
@@ -1013,52 +1028,88 @@ def on_link_change(row_id, link_off):
             except OSError:
                 pass
     scan_requested.set()
+    if not link_off:
+        # The scan right after a link-up can miss a device that is still
+        # waking: one more, a few seconds later.
+        retry = threading.Timer(LINK_UP_RETRY_SECONDS, scan_requested.set)
+        retry.daemon = True
+        retry.start()
     publish_categories()
 
+LINK_UP_RETRY_SECONDS = 5.0
+BATTERY_EVENT_SECONDS = 1.0
+battery_event_at = {}     # row id -> time.time() of its last battery event
+battery_written_at = {}   # row id -> time.time() of its last event write
+pending_battery = {}      # row id -> (battery, charging), not written yet
+
 def on_battery_event(row_id, report):
-    """A battery event of a device that the last scan found: rewrite its
-    row at once, like the scan would. An event from a slot or a feature
-    index the scan does not know is not a battery reading."""
-    feature, index = receiver_row_battery.get(row_id, (None, None))
-    if not index or report[2] != index:
-        return
-    battery, charging = decode_battery_report(feature, report)
-    if battery is None:
-        return
-    path = os.path.join(STATE_DIR, row_id)
+    """A battery event of a device that the last scan found. An event from
+    a slot or a feature index the scan does not know is not a battery
+    reading. The row is written by flush_battery_events."""
     with rows_lock:
-        raw = read_small_file(path, 512)
-        lines = raw.decode('utf-8', errors='replace').splitlines()[:6] if raw else []
-        if len(lines) != 6:
+        feature, index = receiver_row_battery.get(row_id, (None, None))
+        if not index or report[2] != index:
             return
-        lines[0:3] = [str(battery), '1', '1' if charging else '0']
-        lines[4] = str(int(time.time()))
-        try:
-            atomic_state_write(path, '\n'.join(lines))
-        except OSError:
+        battery, charging = decode_battery_report(feature, report)
+        if battery is None:
             return
-    publish_categories()
+        battery_event_at[row_id] = time.time()
+        pending_battery[row_id] = (battery, charging)
+    flush_battery_events()
+
+def flush_battery_events():
+    """Write the pending battery events into their rows, like the scan
+    would, at most once a second for each row: a device that sends events
+    without pause must not turn each one into a file write."""
+    written = False
+    now = time.time()
+    with rows_lock:
+        for row_id, (battery, charging) in list(pending_battery.items()):
+            if now - battery_written_at.get(row_id, 0) < BATTERY_EVENT_SECONDS:
+                continue
+            del pending_battery[row_id]
+            battery_written_at[row_id] = now
+            wpid = receiver_row_wpids.get(row_id)
+            path = os.path.join(STATE_DIR, row_id)
+            raw = read_small_file(path, 512)
+            lines = raw.decode('utf-8', errors='replace').splitlines()[:6] if raw else []
+            if wpid is None or len(lines) != 6 or lines[5] != f"{wpid:04x}":
+                continue
+            reading = [str(battery), '1', '1' if charging else '0']
+            if lines[0:3] == reading:
+                continue
+            lines[0:3] = reading
+            lines[4] = str(int(now))
+            try:
+                atomic_state_write(path, '\n'.join(lines))
+                written = True
+            except OSError:
+                pass
+    if written:
+        publish_categories()
 
 # The single-device widgets (logibar-mouse, logibar-keyboard) read one file
 # per kind. It is a projection of the receiver rows: the connected device of
 # that kind with the lowest battery, with its own name, the same device the
-# combined widget and the Omarchy panel show. A cable reading still wins in
-# write_state.
+# combined widget and the Omarchy panel show. write_state adds the cable
+# readings.
 categories_lock = threading.Lock()
 
 def publish_categories():
-    raw = read_small_file(os.path.join(STATE_DIR, DISCOVERY_MANIFEST), 4096)
-    rows = []
-    for line in (raw.decode('utf-8', errors='replace').splitlines()[1:] if raw else []):
-        row_id, _, kind = line.partition('\t')
-        if kind not in CABLE_KINDS:
-            continue
-        content = read_small_file(os.path.join(STATE_DIR, row_id), 512)
-        fields = content.decode('utf-8', errors='replace').splitlines() if content else []
-        if len(fields) < 4 or fields[1] != '1' or not fields[0].isdigit():
-            continue
-        rows.append((kind, min(int(fields[0]), 100), fields[2] == '1', fields[3]))
+    # Read and write under one lock: a projection that read the rows earlier
+    # must not write after a newer one.
     with categories_lock:
+        raw = read_small_file(os.path.join(STATE_DIR, DISCOVERY_MANIFEST), 4096)
+        rows = []
+        for line in (raw.decode('utf-8', errors='replace').splitlines()[1:] if raw else []):
+            row_id, _, kind = line.partition('\t')
+            if kind not in CABLE_KINDS:
+                continue
+            content = read_small_file(os.path.join(STATE_DIR, row_id), 512)
+            fields = content.decode('utf-8', errors='replace').splitlines() if content else []
+            if len(fields) < 4 or fields[1] != '1' or not fields[0].isdigit():
+                continue
+            rows.append((kind, min(int(fields[0]), 100), fields[2] == '1', fields[3]))
         for kind in CABLE_KINDS:
             state = {'_source_id': ('rx', kind), '_from_rows': True}
             mine = [row for row in rows if row[0] == kind]
@@ -1091,6 +1142,8 @@ def listen_receiver(path, max_slots):
         scan_requested.set()
         while running:
             r = dev.read(64, timeout_ms=LISTEN_TIMEOUT_MS)
+            if pending_battery:
+                flush_battery_events()
             if not r or len(r) <= 4 or not 1 <= r[1] <= max_slots:
                 continue
             if r[0] == 0x10 and r[2] == 0x41:

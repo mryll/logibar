@@ -911,6 +911,103 @@ class ReceiverBatteryEventTests(unittest.TestCase):
         self.wait_for(self.state / "mouse", "44\n1\n0\nM720 Triathlon")
 
 
+    def row_writes(self):
+        """Count the writes of this test's row from here on."""
+        writes, original = [], self.mod.atomic_state_write
+
+        def counting(path, content):
+            if path == str(self.row):
+                writes.append(content)
+            return original(path, content)
+
+        self.mod.atomic_state_write = counting
+        return writes
+
+    def test_a_flood_of_events_writes_the_row_at_most_once_a_second(self):
+        # A hostile device on the receiver repeats or alternates its battery
+        # without pause: the row is written at most once a second, and the
+        # last reading still arrives.
+        writes = self.row_writes()
+        for i in range(200):
+            self.send([0x11, 0x01, self.mouse.battery_index, 0x00, 30 + i % 2, 0x00, 0x00])
+        time.sleep(0.5)
+        self.assertLessEqual(len(writes), 1)
+        self.wait_for(self.state / "mouse", "31\n1\n0\nM720 Triathlon")
+        self.assertLessEqual(len(writes), 3)
+
+    def test_a_scan_that_started_before_an_event_keeps_the_event(self):
+        # The scan heard 50 %; a 20 % event came after the scan began and
+        # before it published: the row keeps 20 %.
+        started = time.time()
+        devices = self.mod.discover_receiver_devices()
+        self.send([0x11, 0x01, self.mouse.battery_index, 0x00, 20, 0x00, 0x00])
+        self.wait_for(self.state / "mouse", "20\n1\n0\nM720 Triathlon")
+        self.mod.publish_discovered(devices, started)
+        self.assertEqual(self.row.read_text().splitlines()[0], "20")
+        self.assertEqual((self.state / "mouse").read_text(), "20\n1\n0\nM720 Triathlon")
+
+    def test_an_event_does_not_write_a_row_that_names_another_pairing(self):
+        # The row on disk already names the device a newer scan found in
+        # the slot; an event decoded for the old pairing must not touch it.
+        lines = self.row.read_text().splitlines()
+        lines[5] = "4093"
+        self.row.write_text("\n".join(lines))
+        self.send([0x11, 0x01, self.mouse.battery_index, 0x00, 37, 0x00, 0x00])
+        time.sleep(0.3)
+        self.assertEqual(self.row.read_text().splitlines()[0], "50")
+
+    def test_a_scan_that_misses_the_reading_keeps_the_battery_index(self):
+        # A scan whose battery request got no answer: events still decode.
+        self.bus.intercept_next(
+            b"/dev/unifying",
+            lambda cmd: cmd[0] == 0x11 and cmd[2] == self.mouse.battery_index,
+            lambda _request, _reply: [])
+        self.mod.scan_receivers()
+        self.assertIn(self.row.name, self.mod.receiver_row_battery)
+        self.send([0x11, 0x01, self.mouse.battery_index, 0x00, 42, 0x00, 0x00])
+        self.wait_for(self.state / "mouse", "42\n1\n0\nM720 Triathlon")
+
+    def test_a_link_up_asks_for_one_more_scan_a_little_later(self):
+        self.mod.LINK_UP_RETRY_SECONDS = 0.4
+        self.bus.emit_link(b"/dev/unifying", off=False, slot=1)
+        deadline = time.monotonic() + 2
+        while not self.mod.scan_requested.is_set():
+            self.assertLess(time.monotonic(), deadline, "the link-up asked for no scan")
+            time.sleep(0.02)
+        self.mod.scan_requested.clear()
+        self.assertTrue(self.mod.scan_requested.wait(2), "no second scan after a link-up")
+
+    def test_an_older_projection_never_writes_after_a_newer_one(self):
+        # One projection reads the rows while the mouse is on, then stalls;
+        # the mouse goes off and a second projection runs. The first must
+        # not write its older view after the second.
+        mod, row_name = self.mod, self.row.name
+        reading, stall = threading.Event(), threading.Event()
+        original = mod.read_small_file
+
+        def stalling(path, limit):
+            content = original(path, limit)
+            if (os.path.basename(path) == row_name
+                    and threading.current_thread().name == "older"):
+                reading.set()
+                stall.wait(2)
+            return content
+
+        mod.read_small_file = stalling
+        older = threading.Thread(target=mod.publish_categories, name="older")
+        older.start()
+        self.assertTrue(reading.wait(2))
+        lines = self.row.read_text().splitlines()
+        lines[1] = "0"
+        self.row.write_text("\n".join(lines))
+        newer = threading.Thread(target=mod.publish_categories, name="newer")
+        newer.start()
+        time.sleep(0.2)
+        stall.set()
+        older.join(3)
+        newer.join(3)
+        self.assertEqual((self.state / "mouse").read_text(), "0\n0\n0\n")
+
 class HeadsetStateFileTests(unittest.TestCase):
     """The headset daemon writes the same four-line contract."""
 
