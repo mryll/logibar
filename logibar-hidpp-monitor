@@ -752,6 +752,9 @@ def monitor_wireless(wireless_pid, name, waybar_signal, battery_feature, state, 
     dev = None
     opened = None  # (path, serial) of the open receiver
     retry = {'at': None, 'delay': REQUERY_FIRST_DELAY}
+    # A device on its cable can keep its link quiet, and come back to the
+    # receiver with no link event: when a cable device goes, read again.
+    seen_unplugs = cable_unplugs[0]
 
     while running:
         try:
@@ -797,6 +800,10 @@ def monitor_wireless(wireless_pid, name, waybar_signal, battery_feature, state, 
                     time.sleep(0.5)
                     continue
 
+            if cable_unplugs[0] != seen_unplugs:
+                seen_unplugs = cable_unplugs[0]
+                enable_notifications(dev)
+                requery_wireless_battery(dev, device_idx, name, waybar_signal, battery_feature, state, state_lock)
             retry_failed_requery(retry, dev, device_idx, name, waybar_signal, battery_feature, state, state_lock)
 
             # Blocking read with timeout - true event-driven
@@ -863,9 +870,9 @@ def is_cable_node(hid_device_dir):
     parent = os.path.basename(os.path.dirname(hid_device_dir)).upper()
     return node.startswith('0003:046D:') and not parent.startswith('0003:046D:')
 
-def cable_call(dev, feat_idx, function, params=()):
+def cable_call(dev, feat_idx, function, swid, params=()):
     """One HID++ 2.0 request to the device on the cable; its reply or None."""
-    request = function | SWID_PROBE
+    request = function | swid
     flush_buffer(dev)
     dev.write([0x11, CABLE_IDX, feat_idx, request] + list(params) + [0] * (16 - len(params)))
     for _ in range(20):
@@ -876,50 +883,71 @@ def cable_call(dev, feat_idx, function, params=()):
     return None
 
 def probe_cable(dev, pid):
-    """The device on this cable node, or None when it is not a keyboard or a
-    mouse that speaks HID++ 2.0 and reports a battery."""
-    name_idx = get_feature_index(dev, CABLE_IDX, DEVICE_NAME_FEATURE, swid=SWID_PROBE)
+    """('device', info) for a keyboard or a mouse that speaks HID++ 2.0 and
+    reports a battery; ('other', None) when the node answered and is none of
+    that; ('silent', None) when a request got no answer, which can pass.
+
+    Each request signs with its own software id: a ROOT reply does not say
+    which feature it resolves, so a late reply to one lookup, with a shared
+    id, would give its index to the next lookup."""
+    swids = itertools.cycle(DISCOVERY_SWIDS)
+    name_idx = get_feature_index(dev, CABLE_IDX, DEVICE_NAME_FEATURE, swid=next(swids))
+    if name_idx is None:
+        return 'silent', None
     if not name_idx:
-        return None
-    kind_reply = cable_call(dev, name_idx, 0x20)
-    kind = HIDPP20_KIND.get(kind_reply[4]) if kind_reply else None
+        return 'other', None
+    kind_reply = cable_call(dev, name_idx, 0x20, next(swids))
+    if kind_reply is None:
+        return 'silent', None
+    kind = HIDPP20_KIND.get(kind_reply[4])
     if kind not in CABLE_KINDS:
-        return None
-    length_reply = cable_call(dev, name_idx, 0x00)
+        return 'other', None
+    length_reply = cable_call(dev, name_idx, 0x00, next(swids))
     length = min(length_reply[4], 48) if length_reply else 0
     name = bytearray()
     while len(name) < length:
-        part = cable_call(dev, name_idx, 0x10, [len(name)])
+        part = cable_call(dev, name_idx, 0x10, next(swids), [len(name)])
         if not part or len(part) <= 4:
             break
         name.extend(part[4:4 + min(length - len(name), len(part) - 4)])
     for battery_feature in (UNIFIED_BATTERY_FEATURE, BATTERY_STATUS_FEATURE,
                             BATTERY_VOLTAGE_FEATURE):
-        feat_idx = get_feature_index(dev, CABLE_IDX, battery_feature, swid=SWID_PROBE)
+        feat_idx = get_feature_index(dev, CABLE_IDX, battery_feature, swid=next(swids))
+        if feat_idx is None:
+            return 'silent', None
         if feat_idx:
             break
     else:
-        return None
+        return 'other', None
     # getDeviceInfo: unit id at 5-8, transports at 9-10, then three PIDs.
     wpids = set()
-    info_idx = get_feature_index(dev, CABLE_IDX, DEVICE_INFO_FEATURE, swid=SWID_PROBE)
-    info = cable_call(dev, info_idx, 0x00) if info_idx else None
+    info_idx = get_feature_index(dev, CABLE_IDX, DEVICE_INFO_FEATURE, swid=next(swids))
+    info = cable_call(dev, info_idx, 0x00, next(swids)) if info_idx else None
     if info and len(info) >= 17:
         wpids = {info[i] << 8 | info[i + 1] for i in (11, 13, 15)} - {0}
-    return {'kind': kind, 'name': model_name(bytes(name).decode('utf-8', errors='replace'), kind, pid),
-            'battery_feature': battery_feature, 'feat_idx': feat_idx, 'wpids': frozenset(wpids)}
+    return 'device', {
+        'kind': kind, 'name': model_name(bytes(name).decode('utf-8', errors='replace'), kind, pid),
+        'battery_feature': battery_feature, 'feat_idx': feat_idx, 'wpids': frozenset(wpids)}
 
-def monitor_cable(path, pid):
+CABLE_RETRY_SECONDS = 10.0
+CABLE_SILENT_TRIES = 3   # then the node waits for a change of the node set
+CABLE_PUBLISH_SECONDS = 1.0
+cable_failures = {}      # path -> probes with no answer, in this node set
+cable_retry_at = {}      # path -> monotonic time of the next probe
+cable_unplugs = [0]      # bumped when a cable device goes: the wireless lines read again
+
+def monitor_cable(path, pid, generation):
     """Probe one cable node, then publish its battery from the device's own
-    events. Ends when the node goes; the scan after that starts a new one."""
+    events. Ends when the node goes; the scan after that starts a new one.
+    `generation` is the node set the probe belongs to: a probe that ends
+    after a replug must not mark the new device on the same path."""
     dev = hid.device()
     state = None
+    outcome = 'silent'
     try:
         dev.open_path(path)
-        device = probe_cable(dev, pid)
+        outcome, device = probe_cable(dev, pid)
         if device is None:
-            with cable_lock:
-                cable_skipped.add(path)
             return
         name = device['kind']
         signal = CATEGORY_SIGNAL[name]
@@ -928,22 +956,26 @@ def monitor_cable(path, pid):
                  '_cable_wpids': device['wpids'], 'wired_connected': True}
         soc = charging = None
         retry_at, delay = 0.0, REQUERY_FIRST_DELAY
+        publish_at = 0.0
         while running:
-            if soc is None and time.monotonic() >= retry_at:
+            now = time.monotonic()
+            if soc is None and now >= retry_at:
                 soc, charging = query_battery(dev, CABLE_IDX, feat_idx, battery_feature)
                 if soc is None:
                     retry_at = time.monotonic() + delay
                     delay = next_requery_delay(delay)
-            if soc is not None:
-                # Every pass, not only on a change: a receiver row of this
+            if soc is not None and now >= publish_at:
+                # Once a second, not only on a change: a receiver row of this
                 # device can appear after it. An unchanged file is not written.
                 write_state(name, soc, True, charging, signal, state)
+                publish_at = now + CABLE_PUBLISH_SECONDS
             r = dev.read(64, timeout_ms=1000)
             if (r and len(r) > 6 and r[0] == 0x11 and r[1] == CABLE_IDX
                     and r[2] == feat_idx and r[3] == EVENT_SWID):
                 new_soc, new_charging = decode_battery_report(battery_feature, r)
-                if new_soc is not None:
+                if new_soc is not None and (new_soc, new_charging) != (soc, charging):
                     soc, charging = new_soc, new_charging
+                    publish_at = 0.0
             elif not r and path not in {node['path'] for node in vendor_nodes(VID)}:
                 break
     except Exception:
@@ -953,26 +985,51 @@ def monitor_cable(path, pid):
         if state is not None:
             state['wired_connected'] = False
             write_state(name, 0, False, False, signal, state)
+        rescan = state is not None
         with cable_lock:
-            cable_monitors.pop(path, None)
+            if cable_monitors.get(path) is threading.current_thread():
+                del cable_monitors[path]
+            if state is not None:
+                cable_unplugs[0] += 1
+            if cable_skip_key[0] != generation:
+                rescan = True   # the node set changed during the probe
+            elif outcome == 'other':
+                cable_skipped.add(path)
+            elif outcome == 'silent' and state is None:
+                tries = cable_failures.get(path, 0) + 1
+                cable_failures[path] = tries
+                if tries >= CABLE_SILENT_TRIES:
+                    cable_skipped.add(path)
+                else:
+                    wait = CABLE_RETRY_SECONDS * 2 ** (tries - 1)
+                    cable_retry_at[path] = time.monotonic() + wait
+                    retry = threading.Timer(wait, scan_requested.set)
+                    retry.daemon = True
+                    retry.start()
+        if rescan and running:
+            scan_requested.set()
 
 def ensure_cable_monitors():
-    """Start a monitor for each cable node that has none. A node that turned
-    out to be no cable device is probed again only after the node set
-    changes: a probe of a node that never answers costs a few seconds."""
+    """Start a monitor for each cable node that has none. A node that is no
+    cable device is probed again only after the node set changes, and so is
+    a node that gave no answer a few times: a probe of a node that never
+    answers costs a few seconds."""
     key = hidraw_fingerprint()
     nodes = {node['path']: node['product_id'] for node in vendor_nodes(VID)
              if node['product_id'] not in RECEIVER_SLOTS}
     with cable_lock:
         if key is None or key != cable_skip_key[0]:
             cable_skipped.clear()
+            cable_failures.clear()
+            cable_retry_at.clear()
             cable_skip_key[0] = key
         for path, pid in sorted(nodes.items()):
-            if path in cable_monitors or path in cable_skipped:
+            if (path in cable_monitors or path in cable_skipped
+                    or cable_retry_at.get(path, 0) > time.monotonic()):
                 continue
             if not is_cable_node(sysfs_hid_device(path)):
                 continue
-            thread = threading.Thread(target=monitor_cable, args=(path, pid), daemon=True)
+            thread = threading.Thread(target=monitor_cable, args=(path, pid, key), daemon=True)
             cable_monitors[path] = thread
             thread.start()
 

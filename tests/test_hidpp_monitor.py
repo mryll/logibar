@@ -1416,8 +1416,13 @@ class CableDiscoveryTests(unittest.TestCase):
         self.harness.module.sysfs_hid_device = lambda path: self.SYSFS.get(path, "")
 
     def tearDown(self):
-        self.harness.threads.extend(self.harness.module.cable_monitors.values())
+        self.stop()
         self.harness.__exit__(None, None, None)
+
+    def stop(self):
+        """Stop and join the cable monitors too: they are not harness threads."""
+        self.harness.threads.extend(self.harness.module.cable_monitors.values())
+        return self.harness.stop()
 
     def writes_to(self, path):
         return [entry for entry in self.bus.log if entry[0] == "write" and entry[2] == path]
@@ -1429,7 +1434,7 @@ class CableDiscoveryTests(unittest.TestCase):
         self.assertEqual(set(module.cable_monitors), {b"/dev/cable"})
         for path in (b"/dev/receiver", b"/dev/paired", b"/dev/bluetooth"):
             self.assertEqual(self.writes_to(path), [], path)
-        self.assertEqual(self.harness.stop()["protocol_errors"], [])
+        self.assertEqual(self.stop()["protocol_errors"], [])
 
     def test_a_node_that_is_no_cable_device_is_probed_once(self):
         # A Logitech USB node that does not answer HID++ 2.0 (or is not a
@@ -1455,6 +1460,115 @@ class CableDiscoveryTests(unittest.TestCase):
             self.assertLess(time.monotonic(), deadline, "no new probe after the node set changed")
             time.sleep(0.02)
 
+
+    def test_a_silent_probe_is_tried_again(self):
+        # A probe that gets no answer once (a busy device) is not a verdict:
+        # the node is probed again after a short wait.
+        module = self.harness.module
+        module.CABLE_RETRY_SECONDS = 0.3
+        module.scan_requested.clear()
+        device = self.bus.nodes[b"/dev/cable"].device
+        self.bus.intercept_next(
+            b"/dev/cable",
+            lambda cmd: cmd[0] == 0x11 and cmd[2] == device.name_index and cmd[3] >> 4 == 2,
+            lambda _request, _reply: [])
+        module.ensure_cable_monitors()
+        deadline = time.monotonic() + 5
+        while module.cable_failures.get(b"/dev/cable") != 1:
+            self.assertLess(time.monotonic(), deadline, "the probe never finished")
+            time.sleep(0.02)
+        self.assertNotIn(b"/dev/cable", module.cable_skipped)
+        self.assertTrue(module.scan_requested.wait(2), "no scan after the retry time")
+        module.ensure_cable_monitors()
+        self.harness.wait_for_state("mouse", "64\n1\n0\nPRO X 2\nwired")
+
+    def test_a_probe_that_ends_after_a_replug_leaves_the_new_device_alone(self):
+        # The old probe gets no answer; meanwhile the node set changes and a
+        # device that answers sits on the same path. The old probe must not
+        # mark that path, and must ask for the scan that starts its monitor.
+        module = self.harness.module
+        module.scan_requested.clear()
+        real_probe, release = module.probe_cable, threading.Event()
+        calls = []
+
+        def probe(dev, pid):
+            calls.append(pid)
+            if len(calls) == 1:          # the old device: no answer
+                release.wait(5)
+                return 'silent', None
+            return real_probe(dev, pid)
+
+        module.probe_cable = probe
+        module.hidraw_fingerprint = lambda: (("hidraw2", 1),)
+        module.ensure_cable_monitors()
+        module.hidraw_fingerprint = lambda: (("hidraw2", 2),)   # replugged
+        module.ensure_cable_monitors()   # the old probe still holds the path
+        self.assertEqual(len(calls), 1)
+        release.set()
+        deadline = time.monotonic() + 5
+        while b"/dev/cable" in module.cable_monitors:
+            self.assertLess(time.monotonic(), deadline, "the old probe never ended")
+            time.sleep(0.02)
+        self.assertNotIn(b"/dev/cable", module.cable_skipped)
+        self.assertNotIn(b"/dev/cable", module.cable_retry_at)
+        self.assertTrue(module.scan_requested.is_set())
+        module.ensure_cable_monitors()
+        self.harness.wait_for_state("mouse", "64\n1\n0\nPRO X 2\nwired")
+
+    def test_a_late_reply_does_not_give_its_index_to_the_next_lookup(self):
+        # The name lookup's reply comes late, during the battery lookup. With
+        # one software id for both, the battery index became the name
+        # feature's, and the name length (7) was published as 7 %.
+        sheet = FakePairedDevice(kind=0x03, battery=66, name="PRO X 2",
+                                 battery_feature=BATTERY_STATUS_FEATURE)
+        bus = FakeHidBus([FakeNode(b"/dev/cable", 0xC09B, sheet, device_idx=0xFF)])
+
+        def with_late_name_reply(request, reply):
+            name_lookup = next(entry[4] for entry in bus.log if entry[0] == "write"
+                               and entry[4][2] == 0x00 and entry[4][4:6] == b"\x00\x05")
+            late = bytes([0x10, 0xFF, 0x00, name_lookup[3], sheet.name_index, 0, 0])
+            return [late, reply]
+
+        bus.intercept_next(b"/dev/cable",
+                           lambda cmd: cmd[0] == 0x10 and cmd[2] == 0x00 and cmd[4:6] == [0x10, 0x00],
+                           with_late_name_reply)
+        with DaemonHarness(bus) as harness:
+            harness.start_cable(b"/dev/cable", 0xC09B)
+            harness.wait_for_state("mouse", "66\n1\n0\nPRO X 2\nwired")
+
+    def test_a_cable_unplug_reads_the_receiver_again(self):
+        # On its cable the mouse can keep its link quiet and come back to the
+        # receiver with no link event: the reading from before the cable is
+        # old, so the wireless line reads again when the cable goes.
+        bus = FakeHidBus([
+            FakeNode(b"/dev/sl2", 0xC54D, FakePairedDevice(kind=0x03, battery=50)),
+            FakeNode(b"/dev/sl2-wired", 0xC09B, FakePairedDevice(
+                kind=0x03, battery=77, charging=True, name="PRO X 2"), device_idx=0xFF),
+        ])
+        with DaemonHarness(bus) as harness:
+            harness.start_wireless(0xC54D, "mouse", 10)
+            harness.wait_for_state("mouse", "50\n1\n0\n")
+            harness.start_cable(b"/dev/sl2-wired", 0xC09B)
+            harness.wait_for_state("mouse", "77\n1\n1\nPRO X 2\nwired")
+            bus.nodes[b"/dev/sl2"].device.battery = 80   # charged on the cable
+            bus.unplug(b"/dev/sl2-wired")
+            harness.wait_for_state("mouse", "80\n1\n0\n")
+
+    def test_a_flood_of_foreign_reports_does_not_publish_each_one(self):
+        bus = FakeHidBus([FakeNode(b"/dev/cable", 0xC09B, FakePairedDevice(
+            kind=0x03, battery=64, name="PRO X 2"), device_idx=0xFF)])
+        with DaemonHarness(bus) as harness:
+            harness.start_cable(b"/dev/cable", 0xC09B)
+            harness.wait_for_state("mouse", "64\n1\n0\nPRO X 2\nwired")
+            calls = []
+            original = harness.module.write_state
+            harness.module.write_state = lambda *args: (calls.append(args), original(*args))
+            with bus._lock:
+                node = bus.nodes[b"/dev/cable"]
+                for _ in range(500):
+                    bus._broadcast_locked(node, bytes([0x11, 0xFF, 0x55, 0x00, 1, 2, 3]))
+            time.sleep(1.5)
+            self.assertLessEqual(len(calls), 3)
 
 class SleepingReceiverTests(unittest.TestCase):
     def test_a_sleeping_receiver_publishes_no_state(self):

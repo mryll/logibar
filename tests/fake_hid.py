@@ -550,7 +550,8 @@ class DaemonHarness:
 
     def start_cable(self, path, pid, barrier=None):
         """One cable monitor, as ensure_cable_monitors starts it."""
-        self._spawn(self.module.monitor_cable, (path, pid), barrier)
+        self._spawn(self.module.monitor_cable,
+                    (path, pid, self.module.cable_skip_key[0]), barrier)
 
     def set_receiver_rows(self, rows):
         """What the last receiver scan found: {row id: wireless PID}."""
