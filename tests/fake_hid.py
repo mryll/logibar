@@ -81,8 +81,9 @@ class FakePairedDevice:
 
     def respond(self, cmd):
         """Returns (report | None, protocol_error | None) for one request."""
-        if len(cmd) >= 4 and cmd[0] == 0x10 and cmd[1] == 0xff and cmd[2] == 0x80:
-            return None, None  # HID++ 1.0 set-register (enable_notifications)
+        register = notification_register(self, cmd)
+        if register is not None:
+            return register
         if len(cmd) >= 5 and cmd[0] == 0x10 and cmd[1] == 0xff and cmd[2] == 0x83:
             # The receiver answers its own registers, awake device or not.
             if 0x40 <= cmd[4] <= 0x45:
@@ -174,6 +175,25 @@ class FakePairedDevice:
                       self.voltage >> 8, self.voltage & 0xff, flags])
 
 
+def notification_register(owner, cmd):
+    """Register 0x00 of a receiver: 0x81 reads it, 0x80 sets it. `owner`
+    keeps the value in `notification_flags` (0 until set), and every set goes
+    to `notification_writes`, so a test sees exactly what was written."""
+    if len(cmd) < 4 or cmd[0] != 0x10 or cmd[1] != 0xff or cmd[3] != 0x00:
+        return None
+    flags = getattr(owner, 'notification_flags', 0)
+    if cmd[2] == 0x81:
+        return bytes([0x10, 0xff, 0x81, 0x00,
+                      (flags >> 16) & 0xff, (flags >> 8) & 0xff, flags & 0xff]), None
+    if cmd[2] == 0x80:
+        if len(cmd) >= 7:
+            owner.notification_flags = cmd[4] << 16 | cmd[5] << 8 | cmd[6]
+            owner.notification_writes = getattr(owner, 'notification_writes', []) + [
+                owner.notification_flags]
+        return None, None
+    return None
+
+
 class FakeReceiver:
     """A receiver with independent paired slots on one hidraw node."""
 
@@ -181,6 +201,9 @@ class FakeReceiver:
         self.devices = devices
 
     def respond(self, cmd):
+        register = notification_register(self, cmd)
+        if register is not None:
+            return register
         if len(cmd) >= 5 and cmd[1] == 0xff and cmd[2] == 0x83:
             sub = cmd[4]
             slot = sub - (0x40 if sub >= 0x40 else 0x20) + 1
@@ -356,15 +379,17 @@ class FakeHidBus:
                 node.device.charging = charging
             self._broadcast_locked(node, node.device.battery_event(node.device_idx))
 
-    def emit_link(self, path, off):
+    def emit_link(self, path, off, slot=None):
         """0x41 connection event; the device sleeps on link_off and wakes
-        BEFORE the daemon's follow-up query on link_on."""
+        BEFORE the daemon's follow-up query on link_on. `slot` picks the
+        device of a FakeReceiver node."""
         with self._lock:
             node = self.nodes[path]
-            node.device.awake = not off
+            device = node.device.devices[slot] if slot is not None else node.device
+            device.awake = not off
             flags = 0x40 if off else 0x00
-            self._broadcast_locked(
-                node, bytes([0x10, node.device_idx, 0x41, 0x00, flags]))
+            index = slot if slot is not None else node.device_idx
+            self._broadcast_locked(node, bytes([0x10, index, 0x41, 0x04, flags]))
 
     # -- internals ------------------------------------------------------
 

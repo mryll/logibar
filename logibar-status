@@ -5,7 +5,7 @@
 # Severity thresholds and aggregation live HERE, once — every frontend (waybar,
 # Omarchy shell) consumes this script instead of re-deciding.
 #
-# Usage: logibar-status [--help] [--json] [--watch] [--devices LIST]
+# Usage: logibar-status [--help] [--json] [--watch] [--devices LIST] [--last-known]
 #                       [--no-color[=all|bar|tooltip]]
 #                       [--color-normal HEX] [--color-warning HEX] [--color-critical HEX]
 #                       [--tooltip-font NAME]
@@ -15,6 +15,13 @@
 #   --json      structured document (schema_version 1): devices[] + aggregate
 #   --watch     stream waybar JSON, one line per state change (needs inotifywait)
 #   --devices   comma-separated subset of: keyboard,mouse,headset,other (default: all)
+#   --last-known
+#               keep a receiver device that stopped answering, with its last
+#               reading from the past 24 hours (state "last_known"). Default:
+#               such a device is disconnected, like one that is off. The
+#               receiver cannot tell asleep from off, so with this flag a
+#               sleeping mouse stays visible, and without it the mouse goes
+#               until it answers again.
 #   --tooltip-font FONT
 #               font family (or Pango family list) the tooltip is pinned to.
 #               Default: "JetBrainsMono Nerd Font Mono, JetBrainsMono Nerd
@@ -182,6 +189,7 @@ CLI_COLOR_CRITICAL=""
 # ese nombre caía en la proporcional del sistema sin decir nada.
 TOOLTIP_FONT="JetBrainsMono Nerd Font, JetBrainsMono Nerd Font Mono, monospace"
 WATCH=false
+SHOW_LAST_KNOWN=false
 PLAIN_SURFACES=""   # "" | all | bar | tooltip — which surfaces drop color
 _nc=""
 DEVICES=("${DEVICE_IDS[@]}")
@@ -203,6 +211,7 @@ while [[ $# -gt 0 ]]; do
         --help|-h) show_help ;;
         --json) shift ;;   # consumed by the pre-scan
         --watch) WATCH=true; shift ;;
+        --last-known) SHOW_LAST_KNOWN=true; shift ;;
         --devices)
             [[ $# -ge 2 ]] || cli_error "--devices requires a value"
             REQUESTED_ALL=false
@@ -269,6 +278,11 @@ $JSON_MODE && $WATCH && cli_error "--watch only makes sense in waybar mode"
 # Sets: BATTERY[id] CONNECTED[id] CHARGING[id] STATE[id] UPDATED[id] NAME[id]
 declare -A BATTERY CONNECTED CHARGING STATE UPDATED NAME DEVICE_KIND LAST_KNOWN LAST_SEEN SOURCE WIRED_RX
 LAST_KNOWN_SECONDS=$((24 * 60 * 60))
+# A device whose link just came up carries a "connecting" seventh line until
+# the scan brings its reading, a second or two later. The mark counts only
+# while the file is this young: a daemon that stops mid-scan cannot leave a
+# row connecting for ever.
+CONNECTING_SECONDS=30
 DYNAMIC_REGISTRY=false
 kind_requested() {
     local requested
@@ -303,14 +317,15 @@ load_dynamic_registry() {
 }
 
 read_one_device() {
-    local id="$1" file battery connected charging model seen blob now epoch
+    local id="$1" file battery connected charging model seen mark blob now epoch mtime
     file="$STATE_DIR/$id"
     BATTERY[$id]=""; CONNECTED[$id]=0; CHARGING[$id]=0; STATE[$id]="disconnected"; UPDATED[$id]=""
     LAST_KNOWN[$id]=""; LAST_SEEN[$id]=""; SOURCE[$id]=""; WIRED_RX[$id]=""
     NAME[$id]="${DEVICE_NAME[$id]}"
     blob=$(read_bounded "$file" "$MAX_STATE_BYTES") || return
-    battery=""; connected=""; charging=""; model=""; seen=""
-    { IFS= read -r battery; IFS= read -r connected; IFS= read -r charging; IFS= read -r model; IFS= read -r seen; } <<< "$blob"
+    battery=""; connected=""; charging=""; model=""; seen=""; mark=""
+    { IFS= read -r battery; IFS= read -r connected; IFS= read -r charging; IFS= read -r model; IFS= read -r seen
+      IFS= read -r _; IFS= read -r mark; } <<< "$blob"   # line 6: wpid
     # "wired", then the receivers of the cable device's family, if any.
     if [[ "$id" != rx-* && "$seen" =~ ^wired((\ rx-[a-f0-9]{8}){0,8})$ ]]; then
         SOURCE[$id]="wired"
@@ -322,12 +337,20 @@ read_one_device() {
     is_battery_digits "$battery" || return
     battery=$(( 10#$battery ))
     (( battery > 100 )) && battery=100
+    if [[ "$id" == rx-* && "$connected" != "1" && "$mark" == "connecting" ]]; then
+        mtime=$(stat -c %Y "$file" 2>/dev/null || echo 0)
+        now=$(date +%s)
+        if [[ "$mtime" =~ ^[0-9]+$ ]] && (( mtime <= now && now - mtime <= CONNECTING_SECONDS )); then
+            STATE[$id]="connecting"
+            return
+        fi
+    fi
     if [[ "$id" == rx-* && "$seen" =~ ^[0-9]{10,11}$ ]]; then
         epoch=$(( 10#$seen ))
         now=$(date +%s)
         if (( epoch <= now && now - epoch <= LAST_KNOWN_SECONDS )); then
             LAST_SEEN[$id]=$(date -Iseconds -d "@$epoch" 2>/dev/null)
-            if [[ "$connected" != "1" ]]; then
+            if [[ "$connected" != "1" ]] && $SHOW_LAST_KNOWN; then
                 LAST_KNOWN[$id]="$battery"
                 STATE[$id]="last_known"
             fi
@@ -728,6 +751,12 @@ emit_waybar() {
             _pct="${LAST_KNOWN[$id]}"
             status="Last known · Not responding"
             _dev_hhmm=$(date -d "${LAST_SEEN[$id]}" '+%b %-d %H:%M' 2>/dev/null)
+        elif [[ "${STATE[$id]}" == "connecting" ]]; then
+            # No number yet, so no meter: the name and one dim line.
+            lines+=("")
+            lines+=(" $(tip_c "$FG" "  ${DEVICE_ICON[$id]}  ${NAME[$id]}")")
+            lines+=(" $(tip_c "$DIM" "  Connecting…")")
+            continue
         else
             continue
         fi
@@ -831,7 +860,17 @@ if $WATCH; then
     load_theme
     emit_once
     mkdir -p "$STATE_DIR" 2>/dev/null
-    while inotifywait -qq -e close_write -e moved_to -e create -e delete "$STATE_DIR" 2>/dev/null; do
+    # A connecting mark expires on its own, with no file event: while one is
+    # shown, wake up after it can have expired (inotifywait exits 2 on the
+    # timeout) and draw again.
+    while true; do
+        _wait=()
+        for _id in "${DEVICES[@]}"; do
+            [[ "${STATE[$_id]}" == "connecting" ]] && { _wait=(-t "$(( CONNECTING_SECONDS + 1 ))"); break; }
+        done
+        inotifywait -qq "${_wait[@]}" -e close_write -e moved_to -e create -e delete "$STATE_DIR" 2>/dev/null
+        _rc=$?
+        (( _rc == 0 || _rc == 2 )) || break
         emit_once
     done
     exit 0

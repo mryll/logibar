@@ -259,9 +259,49 @@ def safe_enumerate(vid, pid):
             cache["vid"], cache["key"], cache["at"] = vid, key, now
         return [d for d in cache["devices"] if d['product_id'] == pid]
 
-def enable_notifications(dev):
-    flags = FLAG_WIRELESS | FLAG_SOFTWARE_PRESENT
-    cmd = [0x10, RECEIVER_IDX, 0x80, REG_NOTIFICATIONS, 0x00, (flags >> 8) & 0xff, flags & 0xff]
+def read_notification_flags(dev):
+    """Register 0x00 of the receiver (a HID++ 1.0 short-register READ, 0x81),
+    as one 24-bit number, or None when the receiver does not answer it."""
+    try:
+        flush_buffer(dev)
+        dev.write([0x10, RECEIVER_IDX, 0x81, REG_NOTIFICATIONS, 0, 0, 0])
+        for _ in range(10):
+            r = dev.read(64, timeout_ms=50)
+            if not r or len(r) < 7 or r[1] != RECEIVER_IDX:
+                continue
+            if r[0] == 0x10 and (r[2], r[3]) == (0x81, REG_NOTIFICATIONS):
+                return r[4] << 16 | r[5] << 8 | r[6]
+            if r[2] == 0x8f and (r[3], r[4]) == (0x81, REG_NOTIFICATIONS):
+                return None
+    except Exception:
+        pass
+    return None
+
+NOTIFICATION_READ_ATTEMPTS = 3
+
+def enable_notifications(dev, blind=True):
+    """Turn on the receiver's wireless and software-present notifications.
+    This register write is the only change logibar makes to hardware state,
+    so it keeps every other flag (another program, such as Solaar, may have
+    set some): read the register, OR the two bits in, and write only when a
+    bit is missing. When the read gets no answer, `blind` writes the two
+    bits alone, as the table monitors always did; the link listener, which
+    also opens receivers logibar did not set up before, passes False and
+    writes nothing rather than clear a flag it could not read. Returns
+    False only when it left the register alone for that reason."""
+    wanted = FLAG_WIRELESS | FLAG_SOFTWARE_PRESENT
+    current = None
+    for _ in range(NOTIFICATION_READ_ATTEMPTS):
+        current = read_notification_flags(dev)
+        if current is not None:
+            break
+    if current is not None and current & wanted == wanted:
+        return True
+    if current is None and not blind:
+        return False
+    flags = (current or 0) | wanted
+    cmd = [0x10, RECEIVER_IDX, 0x80, REG_NOTIFICATIONS,
+           (flags >> 16) & 0xff, (flags >> 8) & 0xff, flags & 0xff]
     try:
         dev.write(cmd)
         time.sleep(0.05)
@@ -271,6 +311,7 @@ def enable_notifications(dev):
                 break
     except:
         pass
+    return True
 
 # Every other read loop in this file is already capped by a `range()`; this one
 # was the exception. `while True` trusts the device to eventually go quiet, and
@@ -1185,6 +1226,17 @@ def atomic_state_write(path, content):
             pass
         raise
 
+def connecting_since(device):
+    """mtime of the device's row when it carries the connecting mark, else None."""
+    path = os.path.join(STATE_DIR, device['id'])
+    raw = read_small_file(path, 512)
+    if raw is None or raw.decode('utf-8', errors='replace').splitlines()[6:7] != [CONNECTING_MARK]:
+        return None
+    try:
+        return os.stat(path, follow_symlinks=False).st_mtime
+    except OSError:
+        return None
+
 def previous_receiver_reading(device, now):
     """Keep a recent successful reading for the same pairing, never its charge flag."""
     path = os.path.join(STATE_DIR, device['id'])
@@ -1216,24 +1268,41 @@ def previous_receiver_reading(device, now):
         return None
     return battery, seen
 
-def publish_discovered(devices):
+def publish_discovered(devices, started=None):
+    """`started`: when the scan began (time.time()). A connecting mark the
+    link listener wrote after that is newer than this scan's view of the
+    device, so a scan that found no answer keeps it instead of erasing it."""
     now = int(time.time())
     for device in devices:
-        battery = device['battery']
-        previous = previous_receiver_reading(device, now) if battery is None else None
-        stored_battery = battery if battery is not None else (previous[0] if previous else 0)
-        last_seen = now if battery is not None else (previous[1] if previous else 0)
-        content = (f"{stored_battery}\n{1 if battery is not None else 0}\n"
-                   f"{1 if battery is not None and device['charging'] else 0}\n"
-                   f"{device['name']}\n{last_seen}\n{device['wpid']:04x}")
-        atomic_state_write(os.path.join(STATE_DIR, device['id']), content)
+        with rows_lock:
+            publish_receiver_row(device, started, now)
     lines = ['logibar-receivers-v1']
     lines.extend(f"{device['id']}\t{device['kind']}" for device in devices)
     atomic_state_write(os.path.join(STATE_DIR, DISCOVERY_MANIFEST), '\n'.join(lines) + '\n')
 
+def publish_receiver_row(device, started, now):
+    """Write one receiver row; the caller holds rows_lock. A link-down newer
+    than the scan wins over the answer the scan heard before it."""
+    battery = device['battery']
+    if (battery is not None and started is not None
+            and link_down_at.get(device['id'], 0) >= started):
+        battery = None
+    previous = previous_receiver_reading(device, now) if battery is None else None
+    stored_battery = battery if battery is not None else (previous[0] if previous else 0)
+    last_seen = now if battery is not None else (previous[1] if previous else 0)
+    content = (f"{stored_battery}\n{1 if battery is not None else 0}\n"
+               f"{1 if battery is not None and device['charging'] else 0}\n"
+               f"{device['name']}\n{last_seen}\n{device['wpid']:04x}")
+    if battery is None and started is not None:
+        marked = connecting_since(device)
+        if marked is not None and marked >= started:
+            content += f"\n{CONNECTING_MARK}"
+    atomic_state_write(os.path.join(STATE_DIR, device['id']), content)
+
 def scan_receivers():
+    started = time.time()
     devices = discover_receiver_devices()
-    publish_discovered(devices)
+    publish_discovered(devices, started)
     return devices
 
 # A rescan runs every DISCOVERY_INTERVAL seconds, and sooner when asked:
@@ -1259,6 +1328,7 @@ def receiver_scan_loop():
         scan_requested.clear()
         try:
             scan_receivers()
+            ensure_listeners()
         except Exception as error:
             print(f'logibar-hidpp-monitor: discovery failed: {error}', file=sys.stderr)
         deadline = time.monotonic() + DISCOVERY_INTERVAL
@@ -1266,6 +1336,119 @@ def receiver_scan_loop():
             if scan_requested.wait(1):
                 time.sleep(RESCAN_SETTLE_SECONDS)
                 break
+
+# ---- Receiver connection events ----
+#
+# The scan polls. A receiver also announces each link change itself: HID++
+# 1.0 notification 0x41, byte 4 bit 0x40 set when the device has no link
+# (off, asleep or out of range). One listener per receiver node turns that
+# into the rows at once, like G HUB: link up adds the connecting mark to the
+# device's row and asks for a scan, which brings the reading a second or two
+# later; link down publishes the row as not answering. A listener blocks in
+# read() and wakes only for a report or once per second to see `running`:
+# it never queries the devices. A watcher thread looks at the hidraw node
+# set every few seconds (a directory listing, not a device query) and asks
+# for a scan when a receiver comes or goes; the scan starts the listeners.
+CONNECTING_MARK = 'connecting'
+LINK_OFF = 0x40
+LISTEN_TIMEOUT_MS = 1000
+HOTPLUG_CHECK_SECONDS = 2.0
+LISTENER_RETRY_SECONDS = 10.0
+listener_retry_at = {}   # path -> time.monotonic() before which no listener restarts
+listeners = {}
+listeners_lock = threading.Lock()
+# row id -> time.time() of its last link-down event. A scan that started
+# before it may still have heard the device answer; that answer is older
+# than the link-down and must not bring the row back (seen live: the M720
+# switched off, reappeared for 1.4 s, then went).
+link_down_at = {}
+# Serializes the two writers of a receiver row (the listener and the scan),
+# so a link event cannot land between the scan's check and its write.
+rows_lock = threading.Lock()
+# Receiver paths already logged as not answering the register read.
+unanswered_receivers = set()
+
+def on_link_change(row_id, link_off):
+    """Rewrite the device's row for a link change and ask for a scan. Only a
+    row the scan already published is touched: a slot without one (a device
+    paired after the last scan) appears with that scan."""
+    path = os.path.join(STATE_DIR, row_id)
+    with rows_lock:
+        if link_off:
+            link_down_at[row_id] = time.time()
+        raw = read_small_file(path, 512)
+        lines = raw.decode('utf-8', errors='replace').splitlines()[:6] if raw else []
+        if len(lines) == 6:
+            if link_off:
+                lines[1], lines[2] = '0', '0'
+            elif lines[1] != '1':
+                lines.append(CONNECTING_MARK)
+            try:
+                atomic_state_write(path, '\n'.join(lines))
+            except OSError:
+                pass
+    scan_requested.set()
+
+def listen_receiver(path, max_slots):
+    rx = receiver_hash(path)
+    dev = hid.device()
+    try:
+        dev.open_path(path)
+        if not enable_notifications(dev, blind=False):
+            # Without its link events the listener is no use. Give its place
+            # back to the periodic scan (not the short retry: a receiver that
+            # never answers would scan every few seconds), and log it once.
+            if path not in unanswered_receivers:
+                unanswered_receivers.add(path)
+                print(f'logibar-hidpp-monitor: receiver {path!r} did not answer the notification '
+                      'register read; its devices appear with the next scan', file=sys.stderr)
+            with listeners_lock:
+                listener_retry_at[path] = time.monotonic() + DISCOVERY_INTERVAL
+            return
+        unanswered_receivers.discard(path)
+        # The register exchange above reads and drops whatever arrives, a
+        # link event included: one scan covers that window.
+        scan_requested.set()
+        while running:
+            r = dev.read(64, timeout_ms=LISTEN_TIMEOUT_MS)
+            if (r and len(r) > 4 and r[0] == 0x10 and r[2] == 0x41
+                    and 1 <= r[1] <= max_slots):
+                on_link_change(f'rx-{rx}-{r[1]}', bool(r[4] & LINK_OFF))
+    except Exception:
+        # Unplugged (read raises) or a transient error: a scan in a few
+        # seconds starts a new listener if the receiver is still there,
+        # without a scan loop while it keeps failing.
+        if running:
+            with listeners_lock:
+                listener_retry_at[path] = time.monotonic() + LISTENER_RETRY_SECONDS
+            retry = threading.Timer(LISTENER_RETRY_SECONDS, scan_requested.set)
+            retry.daemon = True
+            retry.start()
+    finally:
+        close_quietly(dev)
+        with listeners_lock:
+            listeners.pop(path, None)
+
+def ensure_listeners():
+    for pid, max_slots in RECEIVER_SLOTS.items():
+        for node in safe_enumerate(VID, pid):
+            path = node['path']
+            with listeners_lock:
+                if path in listeners or listener_retry_at.get(path, 0) > time.monotonic():
+                    continue
+                thread = threading.Thread(target=listen_receiver, args=(path, max_slots),
+                                          daemon=True)
+                listeners[path] = thread
+            thread.start()
+
+def watch_hotplug():
+    seen = hidraw_fingerprint()
+    while running:
+        time.sleep(HOTPLUG_CHECK_SECONDS)
+        current = hidraw_fingerprint()
+        if current != seen:
+            seen = current
+            scan_requested.set()
 
 def read_small_file(path, limit):
     """Bounded read of a regular file this user owns, or None. No symlink,
@@ -1400,6 +1583,7 @@ def main():
     threads = []
     scanner = threading.Thread(target=receiver_scan_loop, daemon=True)
     scanner.start()
+    threading.Thread(target=watch_hotplug, daemon=True).start()
     for wireless_pid, wired_pid, name, waybar_signal, model in DEVICES:
         threads.extend(monitor_device(wireless_pid, wired_pid, name, waybar_signal, model))
 

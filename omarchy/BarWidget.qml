@@ -8,8 +8,12 @@ import qs.Ui
 // --json), the state-file watchers, and the detail panel live in Panel.qml
 // (loaded once, shared identity for the bar's popout coordinator).
 //
-// Bar face: current readings and individually dimmed recent last-known values.
-// A charging glyph appears only while a device responds.
+// Bar face (setting barFace): "lowest", the default, is the stepped battery
+// glyph of the worst connected device (charging variant when anything
+// charges) + its percent, tinted by a continuous level gradient between theme
+// tokens; "icon" is the glyph alone; "devices" is one value per device, each
+// dimmed on its own when it is last known. A vertical bar shows the glyph
+// only. Collapses when there is nothing to show.
 BarWidget {
   id: root
   moduleName: "mryll.logibar"
@@ -17,7 +21,8 @@ BarWidget {
   readonly property var panelItem: panelLoader.item
   readonly property string faceGlyph: panelItem ? panelItem.faceGlyph : ""
   readonly property string faceLabel: panelItem ? panelItem.faceLabel : ""
-  readonly property string faceText: faceLabel !== "" ? faceLabel : faceGlyph
+  readonly property string faceText: faceGlyph === "" ? ""
+    : (faceLabel !== "" ? faceGlyph + " " + faceLabel : faceGlyph)
 
   function injectPanel() {
     var target = panelLoader.item
@@ -63,7 +68,8 @@ BarWidget {
   // is the honest extent, so the mark tracks what the widget draws instead of a
   // fraction of the box it happens to sit in. (Same hint the first-party clock
   // gives; it passes its label width.)
-  readonly property real openPanelIndicatorWidth: button.vertical ? button.labelWidth : faceRow.implicitWidth
+  readonly property real openPanelIndicatorWidth: perDevice ? faceRow.implicitWidth : button.labelWidth
+  readonly property bool perDevice: panelItem ? panelItem.barFace === "devices" && !button.vertical : false
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -86,21 +92,21 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: vertical ? root.faceGlyph : ""
-    labelVisible: vertical
+    text: root.perDevice ? "" : root.faceText
+    labelVisible: !root.perDevice
     hasVisualContent: root.faceText !== ""
-    fixedWidth: vertical ? -1 : Math.max(12, faceRow.implicitWidth + scaledHorizontalMargin * 2)
+    fixedWidth: root.perDevice ? Math.max(12, faceRow.implicitWidth + scaledHorizontalMargin * 2) : -1
     foreground: root.panelItem ? root.panelItem.barColor
       : (root.bar ? root.bar.barForeground : Commons.Color.foreground)
-    // Dim the icon-only face when every value is last known. In a horizontal
-    // bar each device has its own opacity. A failed poll behind good data
-    // used to drop the whole face to 45% opacity, which restated the error in
-    // the same channel the battery ramp already uses — the percentage read as a
-    // different color depending on whether the last read succeeded, and it
-    // disagreed with the panel, which kept painting the true ramp color. The
-    // error is reported in the panel.
+    // Dim ONLY when there is no live value to show: no data, or only
+    // last-known readings. A failed poll behind good data used to drop the
+    // whole face to 45% opacity, which restated the error in the same channel
+    // the battery ramp already uses — the percentage read as a different color
+    // depending on whether the last read succeeded, and it disagreed with the
+    // panel, which kept painting the true ramp color. The error is reported in
+    // the panel.
     dimmed: root.panelItem ? root.panelItem.hasData !== true
-      || (vertical && root.panelItem.connectedCount === 0) : true
+      || (!root.perDevice && root.panelItem.faceLastKnown === true) : true
     // Quick summary on hover; the panel is the detail view.
     tooltipText: root.panelItem ? root.panelItem.tooltipText : ""
 
@@ -112,14 +118,17 @@ BarWidget {
       }
     }
 
+    // "devices": one entry per device, each in its own ramp color. No scan
+    // glyph here: the panel footer reports the scan, so the bar keeps its
+    // width while it runs.
     Row {
       id: faceRow
-      visible: !button.vertical
+      visible: root.perDevice
       anchors.centerIn: parent
       spacing: Style.space(10)
 
       Repeater {
-        model: root.panelItem ? root.panelItem.faceEntries : []
+        model: root.perDevice && root.panelItem ? root.panelItem.faceEntries : []
         Text {
           required property var modelData
           text: modelData.text
@@ -132,15 +141,6 @@ BarWidget {
           font.pixelSize: button.fontSize
           renderType: Text.NativeRendering
         }
-      }
-
-      Text {
-        visible: root.panelItem && root.panelItem.fullRefreshing
-        text: "󰑐"
-        color: root.bar ? root.bar.barForeground : Commons.Color.foreground
-        font.family: button.fontFamily
-        font.pixelSize: button.fontSize
-        renderType: Text.NativeRendering
       }
     }
   }

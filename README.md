@@ -28,9 +28,9 @@ The same core drives both frontends, so a number reads the same on either one:
 
 ## Features
 
-- **One widget for all devices.** The Omarchy bar shows each device's reading, with recent last-known readings dimmed. The Waybar face shows the device that needs attention first. One click or one hover shows the details of each device.
+- **One widget for all devices.** The bar shows one battery glyph and the device that needs attention first, on Waybar and on Omarchy. The Omarchy face can also be the glyph alone or one value for each device (`barFace`). One click or one hover shows the details of each device.
 - **Receiver discovery.** The HID++ monitor reads the pairing slots of Unifying and Lightspeed receivers. Each paired device gets its own row, so two mice show as two rows.
-- **Event-driven, with a slow rescan.** Two small daemons listen for HID++ events, and the bar refreshes when the hardware sends one. The receiver scan runs at startup, after each event, every five minutes, and when you click the Omarchy widget.
+- **Event-driven, like G HUB.** Two small daemons listen for HID++ events, and the bar refreshes when the hardware sends one. Each receiver says when a device connects or disconnects: a device that you switch on shows "Connecting…" at once and its battery a second or two later; a device that you switch off disappears at once. The receiver scan also runs at startup, when a receiver is plugged in or out, every five minutes, and when you click the Omarchy widget.
 - **A real gauge.** The meters go from red at empty, through amber, to green at full. The colors come from your theme.
 - **Two frontends, one brain.** `logibar-status` makes every decision. Waybar and the Omarchy plugin only draw the result.
 - **Theme-aware.** The colors come from the active Omarchy theme, or from a pywal cache, or from a built-in palette.
@@ -52,9 +52,9 @@ The same core drives both frontends, so a number reads the same on either one:
 
 Devices on a Unifying or Lightspeed receiver need no table entry: the receiver scan below finds them. A cable or another receiver family needs a new entry in a table. The section [Add a device](#add-a-device) gives the procedure.
 
-Receiver discovery no longer needs a model table for devices paired to Unifying (`c52b`, `c532`) or supported Lightspeed (`c539`, `c545`, `c547`, `c54d`) receivers. It reads each pairing slot, asks the device for its name and battery through HID++ 2.0 (`0x1004`, `0x1000`, `0x1001`), or through the HID++ 1.0 battery registers (`0x0d`, `0x07`) when the device speaks HID++ 1.0. A device that responded within the past 24 hours remains visible with a dimmed, explicitly **last-known** percentage when it stops replying; the charging icon disappears until a fresh reply confirms charging. The panel shows when that device was last seen. Never-seen pairings and readings older than 24 hours stay hidden, as do pairings absent from the latest receiver scan. A device paired in the slot of another one of the same model shows that device's last-known reading until it answers for the first time. A missing reply can mean sleep, power off, out of range, or an unsupported query, so the UI says **Not responding** rather than guessing. Legacy wired and headset state remains a fallback when the scan has no pairing of that kind. Bolt receivers use different pairing registers and are not covered by this discovery path.
+Receiver discovery no longer needs a model table for devices paired to Unifying (`c52b`, `c532`) or supported Lightspeed (`c539`, `c545`, `c547`, `c54d`) receivers. It reads each pairing slot, asks the device for its name and battery through HID++ 2.0 (`0x1004`, `0x1000`, `0x1001`), or through the HID++ 1.0 battery registers (`0x0d`, `0x07`) when the device speaks HID++ 1.0. A device that stops replying disappears, like a device that is off: the receiver cannot tell a sleeping device from one that is off, so a mouse that stays still for some minutes also disappears until it answers again. With `--last-known` (Omarchy setting `showLastKnown`), a device that responded within the past 24 hours remains visible instead, with a dimmed, explicitly **last-known** percentage; the charging icon disappears until a fresh reply confirms charging, and the panel shows when that device was last seen. Never-seen pairings and readings older than 24 hours stay hidden, as do pairings absent from the latest receiver scan. A device paired in the slot of another one of the same model shows that device's last-known reading until it answers for the first time. A missing reply can mean sleep, power off, out of range, or an unsupported query, so the UI says **Not responding** rather than guessing. Legacy wired and headset state remains a fallback when the scan has no pairing of that kind. Bolt receivers use different pairing registers and are not covered by this discovery path.
 
-In the Omarchy plugin, clicking the bar widget or pressing `r` in its panel asks the running daemon to scan the receivers now (`logibar-hidpp-monitor --refresh`). The plugin itself never talks to the hardware. A loading glyph appears beside the bar readings until the scan ends. The click refresh needs a daemon from the same release as the plugin: `omarchy plugin update` does not update the package, so run `yay -S logibar` too. With an older daemon, or with the daemon stopped, the panel shows "Refresh needs a running, up-to-date logibar daemon" and does nothing. The default panel settings also need the package of the same release: an older `logibar-status` does not know the `other` kind. The MX Master 2S can report only charge ranges while charging; a displayed 50% or 90% may be an estimate rather than an exact percentage.
+In the Omarchy plugin, clicking the bar widget or pressing `r` in its panel asks the running daemon to scan the receivers now (`logibar-hidpp-monitor --refresh`). The plugin itself never talks to the hardware. The scan shows nothing while it runs. The click refresh needs a daemon from the same release as the plugin: `omarchy plugin update` does not update the package, so run `yay -S logibar` too. With an older daemon, or with the daemon stopped, the bar tooltip shows "Refresh needs a running, up-to-date logibar daemon" and the click does nothing else. The default panel settings also need the package of the same release: an older `logibar-status` does not know the `other` kind. The MX Master 2S can report only charge ranges while charging; a displayed 50% or 90% may be an estimate rather than an exact percentage.
 
 ## Requirements
 
@@ -132,7 +132,7 @@ To remove any of them, use the same name with `uninstall`, such as `make uninsta
 
 ### Waybar: one module for every device
 
-The bar shows the battery of the responding device with the lowest charge, or a dimmed last-known reading when only recently seen devices remain. The tooltip gives one block for each visible device: its glyph, level meter, and a line with charging or last-known status and the time of its last successful reading.
+The bar shows the battery of the responding device with the lowest charge. With `--last-known`, it shows a dimmed last-known reading when only recently seen devices remain. The tooltip gives one block for each visible device: its glyph, level meter, and a line with charging or last-known status and the time of its last successful reading.
 
 The time is per device, not per tooltip. Each daemon writes its own device's reading at its own time, so a single "Updated" line would put the newest device's time next to every other device's older number.
 
@@ -154,7 +154,7 @@ Add these lines to `~/.config/waybar/config.jsonc`:
 
 Run `logibar-status --help` for the full reference: the usage line, every flag, and the format placeholders.
 
-`--watch` prints a new line on each change, so the bar does not poll. This flag needs `inotify-tools`. Without that package, use `"exec": "logibar-status"` and select your own `"interval"`. To hide a device, give the names of the devices that you want: `--devices keyboard,mouse`.
+`--watch` prints a new line on each change, so the bar does not poll. This flag needs `inotify-tools`. Without that package, use `"exec": "logibar-status"` and select your own `"interval"`. To hide a device, give the names of the devices that you want: `--devices keyboard,mouse`. To keep a device that stops answering, with its last reading, add `--last-known`.
 
 ### Waybar: one module per device
 
@@ -233,10 +233,12 @@ The command links this repository into `~/.config/omarchy/plugins/mryll.logibar`
 | Setting | Type | Default | Result |
 |---|---|---|---|
 | `colorMode` | enum | `full` | Where the colors appear: `full`, `none`, `bar-only`, `panel-only` |
+| `barFace` | enum | `lowest` | The bar face: `lowest` (one glyph and the lowest battery), `icon` (the glyph alone), `devices` (one value for each device) |
 | `showKeyboard` | boolean | `true` | Includes the keyboard |
 | `showMouse` | boolean | `true` | Includes the mouse |
 | `showHeadset` | boolean | `true` | Includes the headset |
 | `showOther` | boolean | `true` | Includes paired devices of other kinds (a presenter, a numpad) |
+| `showLastKnown` | boolean | `false` | Keeps a device that stops answering, dimmed, with its last reading from the past 24 hours. A sleeping device also stops answering |
 
 Mouse buttons: **left** opens the panel and asks the daemon for a receiver scan, **middle** asks for the scan only. The widget disappears when no device is responding or has a reading from the past 24 hours.
 
@@ -420,7 +422,7 @@ An error is also a JSON document, with an `error` field and the same exit code 0
 ```
 
 1. The **daemons** run as systemd user services and monitor the HID devices.
-2. The daemon writes each change to a **state file** in `$XDG_RUNTIME_DIR/logibar/`, in 4 lines: `battery`, `connected`, `charging`, `model`. A live cable reading adds `wired` as a fifth line, so it remains visible if no receiver pairing is found without reviving an old wireless category reading. Receiver-discovered entries instead add `last_success_epoch` and the paired device's wireless PID, so a sleeping device can retain a bounded last-known reading without inheriting another device's battery when a slot is reused. Each write is atomic. A 3-line file from an older daemon is still valid; the widgets then show a generic name.
+2. The daemon writes each change to a **state file** in `$XDG_RUNTIME_DIR/logibar/`, in 4 lines: `battery`, `connected`, `charging`, `model`. A live cable reading adds `wired` as a fifth line, so it remains visible if no receiver pairing is found without reviving an old wireless category reading. Receiver-discovered entries instead add `last_success_epoch` and the paired device's wireless PID, so a sleeping device can retain a bounded last-known reading without inheriting another device's battery when a slot is reused. A seventh line `connecting` means that the link came up and the reading is on its way; the CLI honors it for 30 seconds only. Each write is atomic. A 3-line file from an older daemon is still valid; the widgets then show a generic name.
 3. **`logibar-status`** reads these files. It selects the worst device, applies the thresholds, finds the colors, and prints the result. The `model` line becomes the device name in the tooltip, in the JSON (`devices[].name`) and in the Omarchy panel. The widgets accept a model only as ASCII letters, digits, space and `._()+/-`, 1 to 48 characters; any other line (accents, markup, control bytes, a longer name) keeps the generic name, so a file that the widget does not write cannot put markup into the tooltip. A NUL byte is dropped by the shell before the check. The name is the table entry for the receiver that answered. Several mice use the LIGHTSPEED receivers `c539` and `c547`. Thus, the daemon also reads the wireless PID of the paired device from the receiver. If `MODEL_BY_WPID` has that PID for the same device type, the daemon shows the name from `MODEL_BY_WPID`. If not, a mouse shows the name of the entry that matched its receiver. A future change can read the name from the device through HID++ DEVICE_NAME (`0x0005`). That change removes this limit.
 4. For Waybar, the daemons also send `SIGRTMIN+N`. For the Omarchy shell, the plugin monitors the files and runs `logibar-status` again after each change.
 

@@ -485,6 +485,38 @@ PY
 _offenders=$(text_without_plain "$PANEL" "$REPO/omarchy/BarWidget.qml")
 check "every data-bearing Text in the plugin is PlainText" test -z "$_offenders"
 
+# ── bar face and silent devices are settings ────────────────────────────────
+#
+# 0.7.0 drew one value per device and kept silent devices by default; both
+# changed the bar that users already had. The defaults are the 0.6.1 face and
+# the G HUB rule (a device that does not answer goes). Neither default adds a
+# CLI flag, so the default plugin also runs on an older CLI.
+
+MANIFEST="$REPO/manifest.json"
+check "the manifest offers barFace lowest|icon|devices, default lowest" \
+    bash -c "jq -e '.barWidget.schema[] | select(.key == \"barFace\") | .options == [\"lowest\",\"icon\",\"devices\"] and .defaultValue == \"lowest\"' '$MANIFEST' && jq -e '.barWidget.defaults.barFace == \"lowest\"' '$MANIFEST'"
+check "the manifest offers showLastKnown, default off" \
+    bash -c "jq -e '.barWidget.schema[] | select(.key == \"showLastKnown\") | .defaultValue == false' '$MANIFEST' && jq -e '.barWidget.defaults.showLastKnown == false' '$MANIFEST'"
+check "the panel reads barFace with lowest as the fallback" grep -qF 'setting("barFace", "lowest")' "$PANEL"
+check "the panel adds --last-known only when the setting is on" \
+    grep -qF 'if (showLastKnown) cmd.push("--last-known")' "$PANEL"
+check "the bar draws no scan glyph (it shifted the other widgets)" \
+    bash -c "! grep -q 'fullRefreshing' '$REPO/omarchy/BarWidget.qml'"
+check "the CLI keeps a silent device only with --last-known" \
+    grep -qF 'if [[ "$connected" != "1" ]] && $SHOW_LAST_KNOWN; then' "$REPO/logibar-status"
+
+# ── the receiver register write keeps foreign flags; connecting is bounded ──
+#
+# Register 0x00 is the one write logibar makes to hardware state, and the link
+# listener makes it on every receiver, also on ones another program set up.
+
+check "notifications are read before they are written" \
+    grep -qF 'current = read_notification_flags(dev)' "$REPO/logibar-hidpp-monitor"
+check "the notification write ORs into the flags it read" \
+    grep -qF 'flags = (current or 0) | wanted' "$REPO/logibar-hidpp-monitor"
+check "the connecting mark counts for 30 seconds only" \
+    grep -qx 'CONNECTING_SECONDS=30' "$REPO/logibar-status"
+
 # ── the README installs from upstream only ───────────────────────────────────
 #
 # An external contribution once pointed every install command at its fork.

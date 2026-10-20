@@ -86,14 +86,28 @@ Panel {
     for (var i = 0; i < status.devices.length; i++) {
       var d = status.devices[i]
       if (d && ((d.connected === true && typeof d.battery === "number")
-                || (d.state === "last_known" && typeof d.last_known_battery === "number"))) out.push(d)
+                || (d.state === "last_known" && typeof d.last_known_battery === "number")
+                || d.state === "connecting")) out.push(d)
     }
     return out
   }
+  // The rows with a number. A connecting device has none yet: it shows in
+  // the panel and the tooltip, never in the bar face.
+  readonly property var faceRows: {
+    var out = []
+    for (var i = 0; i < deviceRows.length; i++)
+      if (!isConnecting(deviceRows[i])) out.push(deviceRows[i])
+    return out
+  }
   readonly property int connectedCount: aggregate ? (aggregate.connected_count || 0) : 0
-  readonly property int lastKnownCount: deviceRows.length - connectedCount
+  readonly property int lastKnownCount: {
+    var n = 0
+    for (var i = 0; i < deviceRows.length; i++) if (isLastKnown(deviceRows[i])) n++
+    return n
+  }
 
   function isLastKnown(device) { return device && device.state === "last_known" }
+  function isConnecting(device) { return device && device.state === "connecting" }
   function displayBattery(device) {
     return isLastKnown(device) ? device.last_known_battery : device.battery
   }
@@ -130,6 +144,17 @@ Panel {
     var v = String(setting("colorMode", "full"))
     return ["full", "none", "bar-only", "panel-only"].indexOf(v) >= 0 ? v : "full"
   }
+  // Bar face: "lowest" is one glyph and the lowest battery (the Waybar
+  // face too), "icon" the glyph alone, "devices" one value per device.
+  // An unknown value normalizes to "lowest", the face before 0.7.0.
+  readonly property string barFace: {
+    var v = String(setting("barFace", "lowest"))
+    return ["lowest", "icon", "devices"].indexOf(v) >= 0 ? v : "lowest"
+  }
+  // Off: a receiver device that stops answering goes, like one that is off.
+  // The receiver cannot tell asleep from off. On: it stays, dimmed, with its
+  // last reading from the past 24 hours (`logibar-status --last-known`).
+  readonly property bool showLastKnown: setting("showLastKnown", false) === true
   readonly property bool barColored:   colorMode === "full" || colorMode === "bar-only"
   readonly property bool panelColored: colorMode === "full" || colorMode === "panel-only"
 
@@ -288,17 +313,20 @@ Panel {
     if (!hasData) return loadError !== "" ? "⚠" : ""
     if (aggregate && connectedCount > 0 && aggregate.worst_battery !== null)
       return batteryGlyph(aggregate.worst_battery, aggregate.any_charging === true)
-    if (deviceRows.length === 0) return ""
+    if (faceRows.length === 0) return ""
     var worst = 100
-    for (var i = 0; i < deviceRows.length; i++)
-      worst = Math.min(worst, displayBattery(deviceRows[i]))
+    for (var i = 0; i < faceRows.length; i++)
+      worst = Math.min(worst, displayBattery(faceRows[i]))
     return batteryGlyph(worst, false)
   }
 
+  // One glyph and one number, like every widget of the family: the device
+  // that needs attention first. The panel is the per-device view. With no
+  // device answering, the worst last-known value shows, dimmed by the bar.
   readonly property var faceEntries: {
     var parts = []
-    for (var i = 0; i < deviceRows.length; i++) {
-      var d = deviceRows[i]
+    for (var i = 0; i < faceRows.length; i++) {
+      var d = faceRows[i]
       var stale = isLastKnown(d)
       parts.push({text: (identityGlyphs[d.kind || d.id] || identityGlyphs.other)
         + " " + displayBattery(d) + "%" + (stale ? " 󰅐" : (d.charging === true ? " 󰂅" : "")),
@@ -307,11 +335,16 @@ Panel {
     return parts
   }
   readonly property string faceLabel: {
-    if (vertical || !hasData) return ""
-    var parts = []
-    for (var i = 0; i < faceEntries.length; i++) parts.push(faceEntries[i].text)
-    return parts.join("  ") + (fullRefreshing ? " 󰑐" : "")
+    if (vertical || !hasData || barFace === "icon") return ""
+    if (aggregate && connectedCount > 0 && aggregate.worst_battery !== null)
+      return aggregate.worst_battery + "%"
+    if (faceRows.length === 0) return ""
+    var worst = 100
+    for (var i = 0; i < faceRows.length; i++)
+      worst = Math.min(worst, displayBattery(faceRows[i]))
+    return worst + "%"
   }
+  readonly property bool faceLastKnown: hasData && connectedCount === 0 && faceRows.length > 0
 
   // Glyph and number share this one color, so the bar element reads as a
   // single unit — and it is the ramp color at the very percentage shown.
@@ -331,14 +364,17 @@ Panel {
     var lines = []
     for (var i = 0; i < deviceRows.length; i++) {
       var d = deviceRows[i]
-      if (isLastKnown(d))
+      if (isConnecting(d))
+        lines.push(d.name + ": Connecting…")
+      else if (isLastKnown(d))
         lines.push(d.name + ": " + d.last_known_battery + "% last known · Not responding"
           + (d.last_seen_at ? " · Last seen " + lastSeenText(d.last_seen_at) : ""))
       else lines.push(d.name + ": " + d.battery + "%"
         + (d.charging === true ? " · Charging" : ""))
     }
-    if (fullRefreshing) lines.push("Refreshing device readings…")
-    else if (refreshError !== "") lines.push(refreshError)
+    // A scan shows nothing: like G HUB, there is no refresh to watch.
+    // Only a refresh that cannot run says so.
+    if (!fullRefreshing && refreshError !== "") lines.push(refreshError)
     return lines.join("\n")
   }
 
@@ -468,8 +504,11 @@ Panel {
     }
     // Every kind enabled (the default) passes no filter: a CLI older than
     // this plugin does not know "other" and rejects the whole list.
-    startRun(devs.length === 4 ? [binName, "--json"]
-                               : [binName, "--json", "--devices", devs.join(",")])
+    // Off (the default) adds no flag either, for the same reason.
+    var cmd = devs.length === 4 ? [binName, "--json"]
+                                : [binName, "--json", "--devices", devs.join(",")]
+    if (showLastKnown) cmd.push("--last-known")
+    startRun(cmd)
   }
 
   function startRun(cmd) {
@@ -835,6 +874,8 @@ Panel {
 
     readonly property int pct: device ? Math.round(Number(root.displayBattery(device) || 0)) : 0
     readonly property bool lastKnown: root.isLastKnown(device)
+    // Link up, reading not here yet: name, an empty track, "Connecting…".
+    readonly property bool connecting: root.isConnecting(device)
     readonly property bool charging: device && !lastKnown ? device.charging === true : false
 
     // What the meter is painting this frame, rounded exactly like the target
@@ -873,7 +914,7 @@ Panel {
           id: identityGlyph
           text: section.device ? (root.identityGlyphs[section.device.kind || section.device.id] || root.identityGlyphs.other) : ""
           textFormat: Text.PlainText
-          color: section.lastKnown ? root.dim : root.foreground
+          color: section.lastKnown || section.connecting ? root.dim : root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.icon
           verticalAlignment: Text.AlignVCenter
@@ -882,7 +923,7 @@ Panel {
         Text {
           text: section.device ? String(section.device.name || section.device.id) : ""
           textFormat: Text.PlainText
-          color: section.lastKnown ? root.dim : root.foreground
+          color: section.lastKnown || section.connecting ? root.dim : root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
           // A Row does not bound its children, so `elide` alone does nothing:
@@ -896,8 +937,9 @@ Panel {
 
       Text {
         id: valueLabel
-        text: (section.charging ? root.batteryGlyph(section.pct, true) + " " : "")
-          + section.displayPct + "%"
+        text: section.connecting ? ""
+          : (section.charging ? root.batteryGlyph(section.pct, true) + " " : "")
+            + section.displayPct + "%"
         textFormat: Text.PlainText
         color: section.rampTint
         font.family: root.fontFamily
@@ -911,8 +953,8 @@ Panel {
     Meter {
       id: meter
       width: parent.width
-      value: section.pct / 100
-      opacity: section.lastKnown ? 0.45 : 1
+      value: section.connecting ? 0 : section.pct / 100
+      opacity: section.lastKnown || section.connecting ? 0.45 : 1
     }
 
     Item {
@@ -921,7 +963,8 @@ Panel {
 
       Text {
         id: statusLabel
-        text: section.lastKnown ? "Last known"
+        text: section.connecting ? "Connecting…"
+          : section.lastKnown ? "Last known"
           : (section.charging ? "Charging" : "On battery")
         textFormat: Text.PlainText
         color: section.charging ? root.mix(root.dim, root.foreground, 0.6) : root.dim
@@ -937,6 +980,7 @@ Panel {
         // but the line is written in the same house shape the other widgets
         // use in theirs: clock glyph, "Updated HH:MM".
         text: {
+          if (section.connecting) return ""
           if (section.lastKnown) {
             var seen = root.lastSeenText(section.device ? section.device.last_seen_at : "")
             return seen !== "" ? "󰅐  Seen " + seen : ""
