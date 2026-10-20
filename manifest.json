@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "mryll.logibar",
   "name": "Logibar",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "author": "mryll",
   "license": "MIT",
   "description": "Combined battery status for supported Logitech Lightspeed and Unifying devices in the Omarchy bar.",
