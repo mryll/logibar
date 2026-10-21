@@ -29,7 +29,7 @@ The same core drives both frontends, so a number reads the same on either one:
 ## Features
 
 - **One widget for all devices.** The bar shows one battery glyph and the device that needs attention first, on Waybar and on Omarchy. The Omarchy face can also be the glyph alone or one value for each device (`barFace`). One click or one hover shows the details of each device.
-- **Receiver discovery.** The HID++ monitor reads the pairing slots of Unifying and Lightspeed receivers. Each paired device gets its own row, so two mice show as two rows.
+- **No device list.** The HID++ monitor reads the pairing slots of Unifying and Lightspeed receivers, and finds a keyboard or a mouse on its USB cable. Each device gives its own name, the same on its cable and through its receiver, and gets its own row, so two mice show as two rows.
 - **Event-driven, like G HUB.** Two small daemons listen for HID++ events, and the bar refreshes when the hardware sends one. Each receiver says when a device connects or disconnects: a device that you switch on shows "Connecting…" at once and its battery a second or two later; a device that you switch off disappears at once. The receiver scan also runs at startup, when a receiver is plugged in or out, every five minutes, and when you click the Omarchy widget.
 - **A real gauge.** The meters go from red at empty, through amber, to green at full. The colors come from your theme.
 - **Two frontends, one brain.** `logibar-status` makes every decision. Waybar and the Omarchy plugin only draw the result.
@@ -49,13 +49,13 @@ Seen on hardware: MX Master 2S, M720 Triathlon, G915 TKL, G915 X TKL, G Pro Wire
 
 No keyboard or mouse needs a table entry: the receiver scan below finds the paired devices, and the daemon finds a device on its cable (see [Devices on a cable](#devices-on-a-cable)). Each device gives its own name. Another receiver family needs its product ID in a table; the section [Add a device](#add-a-device) gives the procedure.
 
-Receiver discovery no longer needs a model table for devices paired to Unifying (`c52b`, `c532`) or supported Lightspeed (`c539`, `c545`, `c547`, `c54d`) receivers. It reads each pairing slot, asks the device for its name and battery through HID++ 2.0 (`0x1004`, `0x1000`, `0x1001`), or through the HID++ 1.0 battery registers (`0x0d`, `0x07`) when the device speaks HID++ 1.0. A device that stops replying disappears, like a device that is off: the receiver cannot tell a sleeping device from one that is off, so a mouse that stays still for some minutes also disappears until it answers again. With `--last-known` (Omarchy setting `showLastKnown`), a device that responded within the past 24 hours remains visible instead, with a dimmed, explicitly **last-known** percentage; the charging icon disappears until a fresh reply confirms charging, and the panel shows when that device was last seen. Never-seen pairings and readings older than 24 hours stay hidden, as do pairings absent from the latest receiver scan. A device paired in the slot of another one of the same model shows that device's last-known reading until it answers for the first time. A missing reply can mean sleep, power off, out of range, or an unsupported query, so the UI says **Not responding** rather than guessing. Legacy wired and headset state remains a fallback when the scan has no pairing of that kind. Bolt receivers use different pairing registers and are not covered by this discovery path.
+Receiver discovery no longer needs a model table for devices paired to Unifying (`c52b`, `c532`) or supported Lightspeed (`c539`, `c545`, `c547`, `c54d`) receivers. It reads each pairing slot, asks the device for its name and battery through HID++ 2.0 (`0x1004`, `0x1000`, `0x1001`), or through the HID++ 1.0 battery registers (`0x0d`, `0x07`) when the device speaks HID++ 1.0. A device that stops replying disappears, like a device that is off: the receiver cannot tell a sleeping device from one that is off, so a mouse that stays still for some minutes also disappears until it answers again. With `--last-known` (Omarchy setting `showLastKnown`), a device that responded within the past 24 hours remains visible instead, with a dimmed, explicitly **last-known** percentage; the charging icon disappears until a fresh reply confirms charging, and the panel shows when that device was last seen. Never-seen pairings and readings older than 24 hours stay hidden, as do pairings absent from the latest receiver scan. A device paired in the slot of another one of the same model shows that device's last-known reading until it answers for the first time. A missing reply can mean sleep, power off, out of range, or an unsupported query, so the UI says **Not responding** rather than guessing. A cable reading and the headset show also when the scan has no pairing of their kind. Bolt receivers use different pairing registers and are not covered by this discovery path.
 
 ### Devices on a cable
 
 A device on its USB cable has its own HID node. The daemon looks at each Logitech USB node that is not a receiver and is not the node of a device paired to a receiver (the kernel puts that node under its receiver). It asks the device at index `0xff` for its kind and name (DEVICE_NAME, `0x0005`) and for a battery feature (`0x1004`, `0x1000` or `0x1001`). A keyboard or a mouse that answers gets a monitor, and its reading has the name that the device gives, the same name as through the receiver. The device also gives its model ID (DEVICE_INFO, `0x0003`), which contains the wireless PID of the device. That PID finds the device's row on its receiver: while the cable is connected, the CLI hides that row when it does not answer, and only that row. A node that does not answer is probed again only when the set of HID nodes changes. A device on Bluetooth is not a cable device.
 
-In the Omarchy plugin, clicking the bar widget or pressing `r` in its panel asks the running daemon to scan the receivers now (`logibar-hidpp-monitor --refresh`). The plugin itself never talks to the hardware. The scan shows nothing while it runs. The click refresh needs a daemon from the same release as the plugin: `omarchy plugin update` does not update the package, so run `yay -S logibar` too. With an older daemon, or with the daemon stopped, the bar tooltip shows "Refresh needs a running, up-to-date logibar daemon" and the click does nothing else. The default panel settings also need the package of the same release: an older `logibar-status` does not know the `other` kind. The MX Master 2S can report only charge ranges while charging; a displayed 50% or 90% may be an estimate rather than an exact percentage.
+In the Omarchy plugin, clicking the bar widget or pressing `r` in its panel asks the running daemon to scan the receivers now (`logibar-hidpp-monitor --refresh`). The plugin itself never talks to the hardware. The scan shows nothing while it runs. The click refresh needs a daemon from the same release as the plugin: `omarchy plugin update` does not update the package, so run `yay -S logibar` too. With an older daemon, or with the daemon stopped, the bar tooltip shows "Refresh needs a running, up-to-date logibar daemon" and the click does nothing else. The default panel settings also need the package of the same release: an older `logibar-status` does not know the `other` kind. The MX Master 2S can report only charge ranges while charging; a displayed 50% or 90% may be an estimate rather than an exact percentage. A device on an AA battery, such as the M720 Triathlon, reports only a few fixed levels (it stays at 50% until it reports 20%), so its reading changes in steps.
 
 ## Requirements
 
@@ -159,7 +159,7 @@ Run `logibar-status --help` for the full reference: the usage line, every flag, 
 
 ### Waybar: one module per device
 
-The three original modules still work, and they now share the colors of the combined module.
+The three original modules still work, and they now share the colors of the combined module. The keyboard and the mouse module show the device of their kind with the lowest battery, cable included, with the device's own name: the same device that the combined module and the Omarchy bar show.
 
 ![The three per-device modules](screenshot.png)
 
@@ -414,11 +414,11 @@ An error is also a JSON document, with an `error` field and the same exit code 0
 
 ```
 ┌──────────────────────┐   state files    ┌──────────────────┐
-│  logibar-hidpp-      │──→ keyboard,mouse│                  │
-│  monitor (Python)    │  ($XDG_RUNTIME_  │ logibar-status   │──→ Waybar
-├──────────────────────┤   DIR/logibar/)  │ logibar-keyboard │
-│  logibar-headset-    │──→ headset ─────→│ logibar-mouse    │──→ Omarchy shell
-│  monitor (Python)    │                  │ logibar-headset  │
+│  logibar-hidpp-      │──→ rx-*, keyboard│                  │
+│  monitor (Python)    │  mouse, wired-*  │ logibar-status   │──→ Waybar
+├──────────────────────┤ ($XDG_RUNTIME_   │ logibar-keyboard │
+│  logibar-headset-    │──→ headset       │ logibar-mouse    │──→ Omarchy shell
+│  monitor (Python)    │  DIR/logibar/)   │ logibar-headset  │
 └──────────────────────┘                  └──────────────────┘
 ```
 
